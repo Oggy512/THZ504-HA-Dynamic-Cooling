@@ -1,4 +1,4 @@
-# Version: 0.6.3
+# Version: 0.6.4
 # Synopsis: Generalized PV-, weather- and UI-time-aware floor cooling control for Tecalor THZ504.
 # Description:
 #   Home Assistant package for conservative floor cooling control.
@@ -17,6 +17,7 @@
 #   - v0.6.1 fixes Home Assistant entity_id generation for Dew Point Safe
 #   - v0.6.2 adds explicit Weather Preconditioning Ready sensor and allows weather-based pre-cooling to satisfy start demand
 #   - v0.6.3 adds Start Conditions Met, Start Blocker diagnostics and defaults Day Start Time to 06:00
+#   - v0.6.4 removes all initial: values from user-editable helpers so UI settings survive restarts
 #   - Flow/return delta diagnostics
 #   - Push notifications on control-state changes
 #
@@ -25,392 +26,530 @@
 #   - weather.get_forecasts is used with type: daily.
 #   - For floor cooling, all relevant heating/cooling circuits must provide sufficient flow.
 
+# Recommended one-time setup values (set manually in the UI after first installation; no helper uses initial:)
+#
+# Entity mapping defaults for this installation:
+#   thz504_entity_indoor_temp_average: sensor.temperatur_haus_mittel_alle
+#   thz504_entity_indoor_temp_weighted: sensor.temperatur_haus_kuhlung_gewichtung
+#   thz504_entity_indoor_humidity_average: sensor.luftfeuchtigkeit_haus_mittel
+#   thz504_entity_outdoor_temp: sensor.temperatur_aussen_mittel
+#   thz504_entity_weather: weather.ieppel31
+#   thz504_entity_pv_generation: sensor.senec_pv_erzeugung
+#   thz504_entity_pv_direct_consumption: sensor.senec_pv_direktverbrauch
+#   thz504_entity_pv_surplus: sensor.pv_ueberschuss
+#   thz504_entity_pv_curtailment: sensor.senec_pv_begrenzung
+#   thz504_entity_grid_import: sensor.senec_netz_bezug
+#   thz504_entity_grid_export: sensor.senec_netz_einspeisung
+#   thz504_entity_battery_soc: sensor.senec_akku_ladestand
+#   thz504_entity_battery_charge: sensor.senec_akku_laden
+#   thz504_entity_battery_discharge: sensor.senec_akku_entladen
+#   thz504_entity_pv_forecast_next_hour: sensor.solcast_pv_forecast_forecast_next_hour
+#   thz504_entity_pv_forecast_today: sensor.solcast_pv_forecast_forecast_today
+#   thz504_entity_pv_forecast_tomorrow: sensor.solcast_pv_forecast_forecast_tomorrow
+#   thz504_entity_cooling_mode_switch: switch.esp32_thz_controller_kuehlmode
+#   thz504_entity_compressor: binary_sensor.esp32_thz_controller_verdichter
+#   thz504_entity_compressor_starts_today: sensor.esp32_thz_controller_starts_tag
+#   thz504_entity_compressor_runtime_current: sensor.thz_verdichter_laufzeit_aktuell
+#   thz504_entity_flow_temperature: sensor.esp32_thz_controller_vorlaufisttemp
+#   thz504_entity_return_temperature: sensor.esp32_thz_controller_ruecklaufisttemp
+#   thz504_entity_dewpoint: sensor.esp32_thz_controller_taupunkt_hk1
+#   thz504_entity_climate_day: climate.esp32_thz_controller_heating_day
+#   thz504_entity_climate_night: climate.esp32_thz_controller_heating_night
+#   thz504_entity_notify_service: notify.mobile_app_op13
+#
+# Feature defaults:
+#   thz504_cooling_automation_enabled: on
+#   thz504_cooling_allow_night: on
+#   thz504_cooling_pv_preconditioning_enabled: on
+#   thz504_cooling_weather_preconditioning_enabled: on
+#
+# Time defaults:
+#   thz504_cooling_day_start_time: 06:00:00
+#   thz504_cooling_day_end_time: 21:00:00
+#
+# Threshold defaults:
+#   thz504_cooling_day_start_temp: 23.2 °C
+#   thz504_cooling_day_stop_temp: 22.0 °C
+#   thz504_cooling_night_start_temp: 23.8 °C
+#   thz504_cooling_night_stop_temp: 22.8 °C
+#   thz504_cooling_comfort_override_temp: 24.8 °C
+#   thz504_cooling_day_setpoint: 22.0 °C
+#   thz504_cooling_night_setpoint: 22.8 °C
+#   thz504_cooling_min_pv_surplus_day: 700 W
+#   thz504_cooling_min_grid_export_day: 500 W
+#   thz504_cooling_max_grid_import_day: 500 W
+#   thz504_cooling_max_grid_import_night: 250 W
+#   thz504_cooling_min_battery_soc_day: 45 %
+#   thz504_cooling_min_battery_soc_night: 70 %
+#   thz504_cooling_max_battery_discharge_night: 1500 W
+#   thz504_cooling_min_pv_forecast_next_hour_wh: 800 Wh
+#   thz504_cooling_min_pv_forecast_today_wh: 12000 Wh
+#   thz504_cooling_weather_hot_temp: 27.0 °C
+#   thz504_cooling_weather_very_hot_temp: 30.0 °C
+#   thz504_cooling_weather_max_precip_probability: 60 %
+#   thz504_cooling_weather_precooling_offset: 0.4 K
+#   thz504_cooling_max_dewpoint_day: 17.0 °C
+#   thz504_cooling_max_dewpoint_night: 16.5 °C
+#   thz504_cooling_max_humidity_day: 65 %
+#   thz504_cooling_max_humidity_night: 62 %
+#   thz504_cooling_dewpoint_safety_margin: 3.0 K
+#   thz504_cooling_max_compressor_starts: 12
+#   thz504_cooling_min_effective_delta: 0.5 K
+#
+# Timer defaults are fixed in YAML:
+#   thz504_cooling_min_runtime: 01:30:00
+#   thz504_cooling_lockout: 01:30:00
+#
+# Central entity mapping. Set these entity IDs once in the UI for the target installation.
 input_text:
+  # Average indoor temperature used as plausibility/secondary demand signal.
+  # Recommended default: sensor.temperatur_haus_mittel_alle
   thz504_entity_indoor_temp_average:
     name: THZ504 Entity Indoor Temperature Average
-    initial: sensor.temperatur_haus_mittel_alle
     max: 120
 
+  # Weighted indoor cooling temperature used as the primary comfort signal.
+  # Recommended default: sensor.temperatur_haus_kuhlung_gewichtung
   thz504_entity_indoor_temp_weighted:
     name: THZ504 Entity Indoor Temperature Weighted
-    initial: sensor.temperatur_haus_kuhlung_gewichtung
     max: 120
 
+  # Average indoor humidity used for condensation risk checks.
+  # Recommended default: sensor.luftfeuchtigkeit_haus_mittel
   thz504_entity_indoor_humidity_average:
     name: THZ504 Entity Indoor Humidity Average
-    initial: sensor.luftfeuchtigkeit_haus_mittel
     max: 120
 
+  # Outdoor temperature used in scoring and plausibility logic.
+  # Recommended default: sensor.temperatur_aussen_mittel
   thz504_entity_outdoor_temp:
     name: THZ504 Entity Outdoor Temperature
-    initial: sensor.temperatur_aussen_mittel
     max: 120
 
+  # Weather entity queried by weather.get_forecasts for daily forecast data.
+  # Recommended default: weather.ieppel31
   thz504_entity_weather:
     name: THZ504 Entity Weather
-    initial: weather.ieppel31
     max: 120
 
+  # Current PV production in W.
+  # Recommended default: sensor.senec_pv_erzeugung
   thz504_entity_pv_generation:
     name: THZ504 Entity PV Generation
-    initial: sensor.senec_pv_erzeugung
     max: 120
 
+  # PV direct consumption in W; used for diagnostics and sensor validity.
+  # Recommended default: sensor.senec_pv_direktverbrauch
   thz504_entity_pv_direct_consumption:
     name: THZ504 Entity PV Direct Consumption
-    initial: sensor.senec_pv_direktverbrauch
     max: 120
 
+  # PV surplus in W; preferred signal for energy availability.
+  # Recommended default: sensor.pv_ueberschuss
   thz504_entity_pv_surplus:
     name: THZ504 Entity PV Surplus
-    initial: sensor.pv_ueberschuss
     max: 120
 
+  # PV limitation/curtailment percentage; values below 100 indicate curtailed production.
+  # Recommended default: sensor.senec_pv_begrenzung
   thz504_entity_pv_curtailment:
     name: THZ504 Entity PV Curtailment
-    initial: sensor.senec_pv_begrenzung
     max: 120
 
+  # Grid import in W; limits unwanted grid-powered cooling.
+  # Recommended default: sensor.senec_netz_bezug
   thz504_entity_grid_import:
     name: THZ504 Entity Grid Import
-    initial: sensor.senec_netz_bezug
     max: 120
 
+  # Grid export in W; indicates available PV surplus.
+  # Recommended default: sensor.senec_netz_einspeisung
   thz504_entity_grid_export:
     name: THZ504 Entity Grid Export
-    initial: sensor.senec_netz_einspeisung
     max: 120
 
+  # Battery state of charge in percent.
+  # Recommended default: sensor.senec_akku_ladestand
   thz504_entity_battery_soc:
     name: THZ504 Entity Battery SOC
-    initial: sensor.senec_akku_ladestand
     max: 120
 
+  # Battery charging power in W; indicates surplus energy.
+  # Recommended default: sensor.senec_akku_laden
   thz504_entity_battery_charge:
     name: THZ504 Entity Battery Charge
-    initial: sensor.senec_akku_laden
     max: 120
 
+  # Battery discharge power in W; limits night cooling aggressiveness.
+  # Recommended default: sensor.senec_akku_entladen
   thz504_entity_battery_discharge:
     name: THZ504 Entity Battery Discharge
-    initial: sensor.senec_akku_entladen
     max: 120
 
+  # PV forecast for the next hour in Wh.
+  # Recommended default: sensor.solcast_pv_forecast_forecast_next_hour
   thz504_entity_pv_forecast_next_hour:
     name: THZ504 Entity PV Forecast Next Hour
-    initial: sensor.solcast_pv_forecast_forecast_next_hour
     max: 120
 
+  # PV forecast for today in Wh.
+  # Recommended default: sensor.solcast_pv_forecast_forecast_today
   thz504_entity_pv_forecast_today:
     name: THZ504 Entity PV Forecast Today
-    initial: sensor.solcast_pv_forecast_forecast_today
     max: 120
 
+  # PV forecast for tomorrow in Wh.
+  # Recommended default: sensor.solcast_pv_forecast_forecast_tomorrow
   thz504_entity_pv_forecast_tomorrow:
     name: THZ504 Entity PV Forecast Tomorrow
-    initial: sensor.solcast_pv_forecast_forecast_tomorrow
     max: 120
 
+  # THZ cooling mode switch controlled by the start/stop automations.
+  # Recommended default: switch.esp32_thz_controller_kuehlmode
   thz504_entity_cooling_mode_switch:
     name: THZ504 Entity Cooling Mode Switch
-    initial: switch.esp32_thz_controller_kuehlmode
     max: 120
 
+  # THZ compressor running state.
+  # Recommended default: binary_sensor.esp32_thz_controller_verdichter
   thz504_entity_compressor:
     name: THZ504 Entity Compressor
-    initial: binary_sensor.esp32_thz_controller_verdichter
     max: 120
 
+  # Compressor starts today; used to prevent excessive cycling.
+  # Recommended default: sensor.esp32_thz_controller_starts_tag
   thz504_entity_compressor_starts_today:
     name: THZ504 Entity Compressor Starts Today
-    initial: sensor.esp32_thz_controller_starts_tag
     max: 120
 
+  # Current compressor runtime; currently used for diagnostics/notifications.
+  # Recommended default: sensor.thz_verdichter_laufzeit_aktuell
   thz504_entity_compressor_runtime_current:
     name: THZ504 Entity Compressor Runtime Current
-    initial: sensor.thz_verdichter_laufzeit_aktuell
     max: 120
 
+  # THZ flow temperature for dewpoint safety and delta diagnostics.
+  # Recommended default: sensor.esp32_thz_controller_vorlaufisttemp
   thz504_entity_flow_temperature:
     name: THZ504 Entity Flow Temperature
-    initial: sensor.esp32_thz_controller_vorlaufisttemp
     max: 120
 
+  # THZ return temperature for cooling delta diagnostics.
+  # Recommended default: sensor.esp32_thz_controller_ruecklaufisttemp
   thz504_entity_return_temperature:
     name: THZ504 Entity Return Temperature
-    initial: sensor.esp32_thz_controller_ruecklaufisttemp
     max: 120
 
+  # THZ heating circuit dewpoint sensor used for floor-cooling condensation safety.
+  # Recommended default: sensor.esp32_thz_controller_taupunkt_hk1
   thz504_entity_dewpoint:
     name: THZ504 Entity Dewpoint
-    initial: sensor.esp32_thz_controller_taupunkt_hk1
     max: 120
 
+  # THZ day target temperature climate entity.
+  # Recommended default: climate.esp32_thz_controller_heating_day
   thz504_entity_climate_day:
     name: THZ504 Entity Climate Day
-    initial: climate.esp32_thz_controller_heating_day
     max: 120
 
+  # THZ night target temperature climate entity.
+  # Recommended default: climate.esp32_thz_controller_heating_night
   thz504_entity_climate_night:
     name: THZ504 Entity Climate Night
-    initial: climate.esp32_thz_controller_heating_night
     max: 120
 
+  # Notification service used for push messages.
+  # Recommended default: notify.mobile_app_op13
   thz504_entity_notify_service:
     name: THZ504 Notify Service
-    initial: notify.mobile_app_op13
     max: 120
 
+# Feature switches. They enable/disable automation, night cooling and pre-cooling logic.
 input_boolean:
+  # Master switch for the whole cooling automation.
+  # Recommended default: true
   thz504_cooling_automation_enabled:
     name: THZ504 Cooling Automation Enabled
     icon: mdi:snowflake-auto
-    initial: true
 
+  # Allows cooling outside the configured day window.
+  # Recommended default: true
   thz504_cooling_allow_night:
     name: THZ504 Cooling Allow Night Operation
     icon: mdi:weather-night
-    initial: true
 
+  # Allows PV-driven pre-cooling before hard comfort demand is reached.
+  # Recommended default: true
   thz504_cooling_pv_preconditioning_enabled:
     name: THZ504 Cooling PV Preconditioning Enabled
     icon: mdi:solar-power-variant
-    initial: true
 
+  # Allows weather-driven pre-cooling on hot forecast days.
+  # Recommended default: true
   thz504_cooling_weather_preconditioning_enabled:
     name: THZ504 Cooling Weather Preconditioning Enabled
     icon: mdi:weather-sunny-alert
-    initial: true
 
 
+# UI configurable day/night window. Day mode uses PV-oriented thresholds; night mode is more conservative.
 input_datetime:
+  # Start of day mode; default recommendation is 06:00:00.
+  # Recommended default: 06:00:00
   thz504_cooling_day_start_time:
     name: THZ504 Cooling Day Start Time
     has_date: false
     has_time: true
-    initial: "06:00:00"
 
+  # End of day mode; default recommendation is 21:00:00.
+  # Recommended default: 21:00:00
   thz504_cooling_day_end_time:
     name: THZ504 Cooling Day End Time
     has_date: false
     has_time: true
-    initial: "21:00:00"
 
+# User-tunable thresholds and setpoints. HA restores UI values after restart because no initial values are used.
 input_number:
+  # Normal day cooling start threshold before weather offset.
+  # Recommended default: 23.2
   thz504_cooling_day_start_temp:
     name: THZ504 Cooling Day Start Temperature
     min: 21
     max: 28
     step: 0.1
     unit_of_measurement: "°C"
-    initial: 23.2
 
+  # Day stop/comfort target temperature.
+  # Recommended default: 22.0
   thz504_cooling_day_stop_temp:
     name: THZ504 Cooling Day Stop Temperature
     min: 20
     max: 26
     step: 0.1
     unit_of_measurement: "°C"
-    initial: 22.0
 
+  # Normal night cooling start threshold.
+  # Recommended default: 23.8
   thz504_cooling_night_start_temp:
     name: THZ504 Cooling Night Start Temperature
     min: 21
     max: 29
     step: 0.1
     unit_of_measurement: "°C"
-    initial: 23.8
 
+  # Night stop/comfort target temperature; deliberately higher than day target.
+  # Recommended default: 22.8
   thz504_cooling_night_stop_temp:
     name: THZ504 Cooling Night Stop Temperature
     min: 20
     max: 27
     step: 0.1
     unit_of_measurement: "°C"
-    initial: 22.8
 
+  # Temperature at which comfort overrides PV/battery optimization.
+  # Recommended default: 24.8
   thz504_cooling_comfort_override_temp:
     name: THZ504 Cooling Comfort Override Temperature
     min: 23
     max: 30
     step: 0.1
     unit_of_measurement: "°C"
-    initial: 24.8
 
+  # Target sent to the THZ day climate entity.
+  # Recommended default: 22.0
   thz504_cooling_day_setpoint:
     name: THZ504 Cooling Day Setpoint
     min: 20
     max: 25
     step: 0.5
     unit_of_measurement: "°C"
-    initial: 22.0
 
+  # Target sent to the THZ night climate entity.
+  # Recommended default: 22.8
   thz504_cooling_night_setpoint:
     name: THZ504 Cooling Night Setpoint
     min: 20
     max: 26
     step: 0.5
     unit_of_measurement: "°C"
-    initial: 22.8
 
+  # Minimum effective PV surplus for day cooling.
+  # Recommended default: 700
   thz504_cooling_min_pv_surplus_day:
     name: THZ504 Cooling Minimum PV Surplus Day
     min: 0
     max: 5000
     step: 100
     unit_of_measurement: "W"
-    initial: 700
 
+  # Minimum grid export considered as usable PV surplus.
+  # Recommended default: 500
   thz504_cooling_min_grid_export_day:
     name: THZ504 Cooling Minimum Grid Export Day
     min: 0
     max: 5000
     step: 100
     unit_of_measurement: "W"
-    initial: 500
 
+  # Maximum tolerated grid import during day cooling.
+  # Recommended default: 500
   thz504_cooling_max_grid_import_day:
     name: THZ504 Cooling Maximum Grid Import Day
     min: 0
     max: 3000
     step: 100
     unit_of_measurement: "W"
-    initial: 500
 
+  # Maximum tolerated grid import during night cooling.
+  # Recommended default: 250
   thz504_cooling_max_grid_import_night:
     name: THZ504 Cooling Maximum Grid Import Night
     min: 0
     max: 3000
     step: 100
     unit_of_measurement: "W"
-    initial: 250
 
+  # Minimum battery SOC for day battery-supported cooling.
+  # Recommended default: 45
   thz504_cooling_min_battery_soc_day:
     name: THZ504 Cooling Minimum Battery SOC Day
     min: 0
     max: 100
     step: 1
     unit_of_measurement: "%"
-    initial: 45
 
+  # Minimum battery SOC for night cooling.
+  # Recommended default: 70
   thz504_cooling_min_battery_soc_night:
     name: THZ504 Cooling Minimum Battery SOC Night
     min: 0
     max: 100
     step: 1
     unit_of_measurement: "%"
-    initial: 70
 
+  # Maximum tolerated battery discharge power at night.
+  # Recommended default: 1500
   thz504_cooling_max_battery_discharge_night:
     name: THZ504 Cooling Maximum Battery Discharge Night
     min: 0
     max: 5000
     step: 100
     unit_of_measurement: "W"
-    initial: 1500
 
+  # Minimum next-hour PV forecast in Wh for forecast-supported cooling.
+  # Recommended default: 800
   thz504_cooling_min_pv_forecast_next_hour_wh:
     name: THZ504 Cooling Minimum PV Forecast Next Hour
     min: 0
     max: 5000
     step: 100
     unit_of_measurement: "Wh"
-    initial: 800
 
+  # Minimum today PV forecast in Wh for forecast-supported cooling.
+  # Recommended default: 12000
   thz504_cooling_min_pv_forecast_today_wh:
     name: THZ504 Cooling Minimum PV Forecast Today
     min: 0
     max: 50000
     step: 500
     unit_of_measurement: "Wh"
-    initial: 12000
 
+  # Forecast temperature threshold for hot-weather cooling pressure.
+  # Recommended default: 27.0
   thz504_cooling_weather_hot_temp:
     name: THZ504 Cooling Weather Hot Temperature
     min: 20
     max: 40
     step: 0.5
     unit_of_measurement: "°C"
-    initial: 27.0
 
+  # Forecast temperature threshold for very-hot-weather cooling pressure.
+  # Recommended default: 30.0
   thz504_cooling_weather_very_hot_temp:
     name: THZ504 Cooling Weather Very Hot Temperature
     min: 22
     max: 42
     step: 0.5
     unit_of_measurement: "°C"
-    initial: 30.0
 
+  # Maximum precipitation probability allowed for weather pre-cooling.
+  # Recommended default: 60
   thz504_cooling_weather_max_precip_probability:
     name: THZ504 Cooling Weather Maximum Precipitation Probability
     min: 0
     max: 100
     step: 1
     unit_of_measurement: "%"
-    initial: 60
 
+  # Temperature offset that lowers the day start threshold during weather pre-cooling.
+  # Recommended default: 0.4
   thz504_cooling_weather_precooling_offset:
     name: THZ504 Cooling Weather Precooling Offset
     min: 0
     max: 2
     step: 0.1
     unit_of_measurement: "K"
-    initial: 0.4
 
+  # Maximum dewpoint allowed during day cooling.
+  # Recommended default: 17.0
   thz504_cooling_max_dewpoint_day:
     name: THZ504 Cooling Maximum Dewpoint Day
     min: 10
     max: 22
     step: 0.1
     unit_of_measurement: "°C"
-    initial: 17.0
 
+  # Maximum dewpoint allowed during night cooling.
+  # Recommended default: 16.5
   thz504_cooling_max_dewpoint_night:
     name: THZ504 Cooling Maximum Dewpoint Night
     min: 10
     max: 22
     step: 0.1
     unit_of_measurement: "°C"
-    initial: 16.5
 
+  # Maximum indoor humidity allowed during day cooling.
+  # Recommended default: 65
   thz504_cooling_max_humidity_day:
     name: THZ504 Cooling Maximum Indoor Humidity Day
     min: 45
     max: 80
     step: 1
     unit_of_measurement: "%"
-    initial: 65
 
+  # Maximum indoor humidity allowed during night cooling.
+  # Recommended default: 62
   thz504_cooling_max_humidity_night:
     name: THZ504 Cooling Maximum Indoor Humidity Night
     min: 45
     max: 80
     step: 1
     unit_of_measurement: "%"
-    initial: 62
 
+  # Required flow-temperature margin above dewpoint when compressor runs.
+  # Recommended default: 3.0
   thz504_cooling_dewpoint_safety_margin:
     name: THZ504 Cooling Dewpoint Safety Margin
     min: 2
     max: 6
     step: 0.1
     unit_of_measurement: "K"
-    initial: 3.0
 
+  # Daily compressor start limit.
+  # Recommended default: 12
   thz504_cooling_max_compressor_starts:
     name: THZ504 Cooling Maximum Compressor Starts Per Day
     min: 2
     max: 30
     step: 1
-    initial: 12
 
+  # Minimum return-flow minus flow-temperature delta for heat extraction diagnostics.
+  # Recommended default: 0.5
   thz504_cooling_min_effective_delta:
     name: THZ504 Cooling Minimum Effective Return Flow Delta
     min: 0
     max: 5
     step: 0.1
     unit_of_measurement: "K"
-    initial: 0.5
 
 timer:
   thz504_cooling_min_runtime:
