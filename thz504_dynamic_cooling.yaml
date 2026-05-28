@@ -1,4 +1,4 @@
-# Version: 0.6.5
+# Version: 0.6.6
 # Synopsis: Generalized PV-, weather- and UI-time-aware floor cooling control for Tecalor THZ504.
 # Description:
 #   Home Assistant package for conservative floor cooling control.
@@ -19,6 +19,7 @@
 #   - v0.6.3 adds Start Conditions Met, Start Blocker diagnostics and defaults Day Start Time to 06:00
 #   - v0.6.4 removes all initial: values from user-editable helpers so UI settings survive restarts
 #   - v0.6.5 limits push notifications to Start Allowed, Control Reason, Start Blocker, Stop Required, Cooling Score and Start Conditions Met
+#   - v0.6.6 adds dependency handling: Weather Preconditioning depends on PV Preconditioning; score pushes are reduced to 10-point band changes
 #   - Flow/return delta diagnostics
 #   - Push notifications only for selected high-level control-state changes
 #
@@ -1224,9 +1225,70 @@ automation:
             Cooling setpoints synchronized to THZ. Day={{ states('input_number.thz504_cooling_day_setpoint') }} °C,
             night={{ states('input_number.thz504_cooling_night_setpoint') }} °C.
 
+  - id: thz504_dynamic_floor_cooling_precooling_dependency
+    alias: "THZ504 - Dynamic Floor Cooling Precooling Dependency"
+    description: "Keeps weather preconditioning dependent on PV preconditioning without sending mobile push notifications."
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - input_boolean.thz504_cooling_pv_preconditioning_enabled
+          - input_boolean.thz504_cooling_weather_preconditioning_enabled
+    action:
+      - choose:
+          # If PV preconditioning is disabled, weather preconditioning is disabled as well.
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{
+                    trigger.entity_id == 'input_boolean.thz504_cooling_pv_preconditioning_enabled'
+                    and trigger.to_state.state == 'off'
+                    and is_state('input_boolean.thz504_cooling_weather_preconditioning_enabled', 'on')
+                  }}
+            sequence:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.thz504_cooling_weather_preconditioning_enabled
+
+              - service: logbook.log
+                data:
+                  name: "THZ504 Cooling"
+                  message: "Weather preconditioning disabled because PV preconditioning was disabled."
+
+              - service: persistent_notification.create
+                data:
+                  title: "THZ504 Cooling"
+                  message: "Weather preconditioning was disabled because PV preconditioning was disabled."
+                  notification_id: thz504_cooling_precooling_dependency
+
+          # If weather preconditioning is enabled while PV preconditioning is disabled, revert it.
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{
+                    trigger.entity_id == 'input_boolean.thz504_cooling_weather_preconditioning_enabled'
+                    and trigger.to_state.state == 'on'
+                    and is_state('input_boolean.thz504_cooling_pv_preconditioning_enabled', 'off')
+                  }}
+            sequence:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.thz504_cooling_weather_preconditioning_enabled
+
+              - service: logbook.log
+                data:
+                  name: "THZ504 Cooling"
+                  message: "Weather preconditioning cannot be enabled while PV preconditioning is disabled."
+
+              - service: persistent_notification.create
+                data:
+                  title: "THZ504 Cooling"
+                  message: "Weather preconditioning cannot be enabled while PV preconditioning is disabled. It was turned off again."
+                  notification_id: thz504_cooling_precooling_dependency
+
   - id: thz504_dynamic_floor_cooling_status_notification
     alias: "THZ504 - Dynamic Floor Cooling Status Notification"
-    description: "Sends concise push notifications only for selected high-level cooling control state changes."
+    description: "Sends concise push notifications only for selected high-level cooling control state changes. Cooling Score is reduced to 10-point band changes."
     mode: queued
     max: 10
     trigger:
@@ -1243,17 +1305,21 @@ automation:
           # Control reason: main high-level cooling state/reason.
           - sensor.thz504_cooling_control_reason
           # Cooling score: diagnostic priority score from 0 to 100 percent.
+          # Push notifications for this sensor are reduced to 10-point band changes.
           - sensor.thz504_cooling_score
     condition:
       - condition: template
         value_template: >
-          {{
-            trigger.from_state is not none
-            and trigger.to_state is not none
-            and trigger.from_state.state not in ['unknown', 'unavailable']
-            and trigger.to_state.state not in ['unknown', 'unavailable']
-            and trigger.from_state.state != trigger.to_state.state
-          }}
+          {% set old = trigger.from_state.state if trigger.from_state is not none else 'unknown' %}
+          {% set new = trigger.to_state.state if trigger.to_state is not none else 'unknown' %}
+          {% set valid_change = old not in ['unknown', 'unavailable'] and new not in ['unknown', 'unavailable'] and old != new %}
+          {% if not valid_change %}
+            false
+          {% elif trigger.entity_id == 'sensor.thz504_cooling_score' %}
+            {{ (old | int(0) // 10) != (new | int(0) // 10) }}
+          {% else %}
+            true
+          {% endif %}
     action:
       - variables:
           notify_service: "{{ states('input_text.thz504_entity_notify_service') }}"
@@ -1267,5 +1333,5 @@ automation:
           title: "THZ504 Cooling state changed"
           message: >
             {{ changed_name }} changed from {{ old_state }} to {{ new_state }}.
-            Reason={{ control_reason }}.
-            Start blocker={{ start_blocker }}.
+            Current Control Reason={{ control_reason }}.
+            Current Start blocker={{ start_blocker }}.
