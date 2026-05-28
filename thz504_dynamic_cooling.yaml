@@ -1,4 +1,4 @@
-# Version: 0.6.2
+# Version: 0.6.3
 # Synopsis: Generalized PV-, weather- and UI-time-aware floor cooling control for Tecalor THZ504.
 # Description:
 #   Home Assistant package for conservative floor cooling control.
@@ -16,6 +16,7 @@
 #   - Dewpoint and humidity safety checks
 #   - v0.6.1 fixes Home Assistant entity_id generation for Dew Point Safe
 #   - v0.6.2 adds explicit Weather Preconditioning Ready sensor and allows weather-based pre-cooling to satisfy start demand
+#   - v0.6.3 adds Start Conditions Met, Start Blocker diagnostics and defaults Day Start Time to 06:00
 #   - Flow/return delta diagnostics
 #   - Push notifications on control-state changes
 #
@@ -577,33 +578,64 @@ template:
         unique_id: thz504_cooling_control_reason
         icon: mdi:information-outline
         state: >
+          {% set cooling_on = is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
           {% if is_state('binary_sensor.thz504_cooling_start_allowed', 'on') %}
             start_allowed
           {% elif is_state('binary_sensor.thz504_cooling_stop_required', 'on') %}
             stop_required
-          {% elif is_state('binary_sensor.thz504_cooling_sensor_data_valid', 'off') %}
-            invalid_sensor_data
-          {% elif is_state('binary_sensor.thz504_cooling_energy_available', 'off') %}
-            insufficient_pv_battery_or_grid_condition
-          {% elif is_state('binary_sensor.thz504_cooling_dew_point_safe', 'off') %}
-            dewpoint_or_humidity_risk
-          {% elif is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'off') %}
-            compressor_start_limit_reached
-          {% elif is_state('binary_sensor.thz504_cooling_time_window_allowed', 'off') %}
-            night_cooling_disabled
-          {% elif is_state('timer.thz504_cooling_lockout', 'active') %}
-            lockout_active
-          {% elif is_state('binary_sensor.thz504_cooling_effective_heat_extraction', 'off') and is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
+          {% elif cooling_on and is_state('binary_sensor.thz504_cooling_start_conditions_met', 'on') %}
+            cooling_active_conditions_met
+          {% elif cooling_on %}
+            cooling_already_enabled
+          {% elif is_state('binary_sensor.thz504_cooling_start_conditions_met', 'on') %}
+            start_conditions_met
+          {% elif states('sensor.thz504_cooling_start_blocker') not in ['unknown', 'unavailable', 'none', ''] %}
+            {{ states('sensor.thz504_cooling_start_blocker') }}
+          {% elif is_state('binary_sensor.thz504_cooling_effective_heat_extraction', 'off') and cooling_on %}
             low_cooling_delta
-          {% elif is_state('binary_sensor.thz504_cooling_demand', 'off') and is_state('binary_sensor.thz504_cooling_weather_preconditioning_ready', 'off') %}
-            no_cooling_demand
-          {% elif is_state('binary_sensor.thz504_cooling_weather_preconditioning_ready', 'on') %}
-            weather_preconditioning_ready
           {% elif is_state('binary_sensor.thz504_weather_cooling_pressure', 'on') %}
             weather_pressure_only_waiting_for_room_or_energy_conditions
           {% else %}
             waiting
           {% endif %}
+
+      - name: "THZ504 Cooling Start Blocker"
+        unique_id: thz504_cooling_start_blocker
+        icon: mdi:alert-circle-outline
+        state: >
+          {% set ns = namespace(blockers=[]) %}
+          {% set cooling_switch = states('input_text.thz504_entity_cooling_mode_switch') %}
+          {% if not is_state('input_boolean.thz504_cooling_automation_enabled', 'on') %}
+            {% set ns.blockers = ns.blockers + ['automation_disabled'] %}
+          {% endif %}
+          {% if not is_state('binary_sensor.thz504_cooling_sensor_data_valid', 'on') %}
+            {% set ns.blockers = ns.blockers + ['invalid_sensor_data'] %}
+          {% endif %}
+          {% if not (
+            is_state('binary_sensor.thz504_cooling_demand', 'on')
+            or is_state('binary_sensor.thz504_cooling_weather_preconditioning_ready', 'on')
+          ) %}
+            {% set ns.blockers = ns.blockers + ['no_cooling_demand_or_weather_preconditioning'] %}
+          {% endif %}
+          {% if not is_state('binary_sensor.thz504_cooling_energy_available', 'on') %}
+            {% set ns.blockers = ns.blockers + ['energy_not_available'] %}
+          {% endif %}
+          {% if not is_state('binary_sensor.thz504_cooling_dew_point_safe', 'on') %}
+            {% set ns.blockers = ns.blockers + ['dew_point_not_safe'] %}
+          {% endif %}
+          {% if not is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'on') %}
+            {% set ns.blockers = ns.blockers + ['compressor_starts_not_safe'] %}
+          {% endif %}
+          {% if not is_state('binary_sensor.thz504_cooling_time_window_allowed', 'on') %}
+            {% set ns.blockers = ns.blockers + ['time_window_not_allowed'] %}
+          {% endif %}
+          {% if not is_state('timer.thz504_cooling_lockout', 'idle') %}
+            {% set ns.blockers = ns.blockers + ['lockout_active'] %}
+          {% endif %}
+          {% if is_state('binary_sensor.thz504_cooling_start_conditions_met', 'on') and not is_state(cooling_switch, 'off') %}
+            {% set ns.blockers = ns.blockers + ['cooling_already_on'] %}
+          {% endif %}
+          {{ ns.blockers | join(', ') if ns.blockers | count > 0 else 'none' }}
 
       - name: "THZ504 Cooling Score"
         unique_id: thz504_cooling_score
@@ -783,7 +815,7 @@ template:
           {% set night_battery_supported = not daytime and soc >= min_soc_night and battery_discharge <= max_discharge_night and grid_import <= max_import_night %}
           {{ day_direct_surplus or day_grid_export or day_forecast_supported or day_weather_supported or day_battery_supported or curtailment_supported or battery_charging_supported or night_battery_supported or comfort_override }}
 
-      - name: "THZ504 Cooling Dewpoint Safe"
+      - name: "THZ504 Cooling Dew Point Safe"
         unique_id: thz504_cooling_dewpoint_safe
         state: >
           {% set humidity = states(states('input_text.thz504_entity_indoor_humidity_average')) | float(99) %}
@@ -819,8 +851,8 @@ template:
           {% set cooling_on = is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
           {{ not cooling_on or not compressor_on or delta >= min_delta }}
 
-      - name: "THZ504 Cooling Start Allowed"
-        unique_id: thz504_cooling_start_allowed
+      - name: "THZ504 Cooling Start Conditions Met"
+        unique_id: thz504_cooling_start_conditions_met
         state: >
           {{
             is_state('input_boolean.thz504_cooling_automation_enabled', 'on')
@@ -834,6 +866,13 @@ template:
             and is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'on')
             and is_state('binary_sensor.thz504_cooling_time_window_allowed', 'on')
             and is_state('timer.thz504_cooling_lockout', 'idle')
+          }}
+
+      - name: "THZ504 Cooling Start Allowed"
+        unique_id: thz504_cooling_start_allowed
+        state: >
+          {{
+            is_state('binary_sensor.thz504_cooling_start_conditions_met', 'on')
             and is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'off')
           }}
 
@@ -1109,7 +1148,9 @@ automation:
     trigger:
       - platform: state
         entity_id:
+          - binary_sensor.thz504_cooling_start_conditions_met
           - binary_sensor.thz504_cooling_start_allowed
+          - sensor.thz504_cooling_start_blocker
           - binary_sensor.thz504_cooling_stop_required
           - binary_sensor.thz504_cooling_demand
           - binary_sensor.thz504_cooling_energy_available
@@ -1153,7 +1194,9 @@ automation:
             day_setpoint={{ states('input_number.thz504_cooling_day_setpoint') }} °C,
             night_setpoint={{ states('input_number.thz504_cooling_night_setpoint') }} °C,
             Cooling={{ states(cooling_switch_entity) }},
+            start_conditions_met={{ states('binary_sensor.thz504_cooling_start_conditions_met') }},
             start_allowed={{ states('binary_sensor.thz504_cooling_start_allowed') }},
+            start_blocker={{ states('sensor.thz504_cooling_start_blocker') }},
             stop_required={{ states('binary_sensor.thz504_cooling_stop_required') }},
             demand={{ states('binary_sensor.thz504_cooling_demand') }},
             energy={{ states('binary_sensor.thz504_cooling_energy_available') }},
