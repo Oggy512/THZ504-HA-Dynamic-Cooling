@@ -713,3 +713,494 @@ sensor.thz504_cooling_return_flow_delta
 binary_sensor.thz504_cooling_dew_point_safe
 binary_sensor.thz504_cooling_energy_available
 ```
+
+
+
+
+----
+
+
+Der **`sensor.thz504_cooling_score`** ist ein reiner **Diagnose- und Prioritätswert** von **0 bis 100 %**. Er entscheidet in v0.6.4 **nicht direkt**, ob die Kühlung startet oder stoppt. Die harten Entscheidungen kommen weiterhin über:
+
+```yaml
+binary_sensor.thz504_cooling_start_conditions_met
+binary_sensor.thz504_cooling_start_allowed
+binary_sensor.thz504_cooling_stop_required
+sensor.thz504_cooling_start_blocker
+```
+
+Der Score beantwortet eher die Frage:
+
+> Wie stark sprechen die aktuellen Bedingungen insgesamt für Kühlung?
+
+---
+
+## Formel in v0.6.4
+
+Im Package wird intern ungefähr so gerechnet:
+
+```jinja
+score =
+  temp_score
+  + outdoor_score
+  + surplus_score
+  + soc_score
+  + charge_score
+  + forecast_score
+  + weather_score
+  + very_hot_bonus
+  + curtailment_score
+  - discharge_penalty
+  - rain_penalty
+  - humidity_penalty
+  - dewpoint_penalty
+```
+
+Danach wird der Wert begrenzt:
+
+```jinja
+minimum 0
+maximum 100
+gerundet auf ganze Prozent
+```
+
+Also:
+
+```text
+unter 0  → 0 %
+über 100 → 100 %
+```
+
+---
+
+# Positive Faktoren
+
+## 1. Raumtemperatur: `temp_score`
+
+```jinja
+temp_reference = 22.0 if daytime else 22.8
+temp_score = (max(weighted, average) - temp_reference) * 28
+```
+
+Verwendet werden:
+
+```yaml
+sensor.temperatur_haus_kuhlung_gewichtung
+sensor.temperatur_haus_mittel_alle
+```
+
+bzw. über Mapping:
+
+```yaml
+input_text.thz504_entity_indoor_temp_weighted
+input_text.thz504_entity_indoor_temp_average
+```
+
+Es wird der höhere Wert aus gewichteter und ungewichteter Temperatur genommen.
+
+Tagsüber ist die Referenz:
+
+```text
+22,0 °C
+```
+
+Nachts:
+
+```text
+22,8 °C
+```
+
+Beispiel Tag:
+
+```text
+gewichtete RT: 23,0 °C
+Referenz:      22,0 °C
+Differenz:      1,0 K
+temp_score:    28 Punkte
+```
+
+Das ist der wichtigste Faktor. Je wärmer das Haus über Ziel liegt, desto höher der Score.
+
+---
+
+## 2. Außentemperatur: `outdoor_score`
+
+```jinja
+outdoor_score = (outdoor - 20) * 3
+```
+
+Beispiel:
+
+```text
+AT 25 °C → (25 - 20) * 3 = 15 Punkte
+AT 30 °C → (30 - 20) * 3 = 30 Punkte
+```
+
+Wenn es außen warm ist, steigt der Score, weil weitere Aufheizung wahrscheinlich ist.
+
+---
+
+## 3. Effektiver PV-Überschuss: `surplus_score`
+
+```jinja
+surplus_score = effective_surplus / 45
+```
+
+Quelle:
+
+```yaml
+sensor.thz504_cooling_effective_pv_surplus
+```
+
+Dieser Sensor nutzt PV-Überschuss und Netzbilanz.
+
+Beispiel:
+
+```text
+900 W Überschuss  → 20 Punkte
+1800 W Überschuss → 40 Punkte
+2700 W Überschuss → 60 Punkte
+```
+
+Damit wird PV-Verfügbarkeit stark positiv bewertet.
+
+---
+
+## 4. Batterie-SOC: `soc_score`
+
+```jinja
+soc_score = (soc - 50) * 0.6
+```
+
+Beispiel:
+
+```text
+SOC 80 % → (80 - 50) * 0.6 = 18 Punkte
+SOC 50 % → 0 Punkte
+SOC 30 % → -12 Punkte
+```
+
+Ein voller Akku erhöht den Score. Ein niedriger Akku senkt ihn.
+
+---
+
+## 5. Akku-Ladung: `charge_score`
+
+```jinja
+charge_score = battery_charge / 100
+```
+
+Beispiel:
+
+```text
+500 W Akku-Ladung  → 5 Punkte
+1500 W Akku-Ladung → 15 Punkte
+2500 W Akku-Ladung → 25 Punkte
+```
+
+Wenn der Akku gerade geladen wird, ist offenbar Energieüberschuss vorhanden. Das spricht für Kühlung bzw. Vorkühlung.
+
+---
+
+## 6. PV-Prognose nächste Stunde: `forecast_score`
+
+```jinja
+forecast_score = pv_next_wh / 80
+```
+
+Quelle:
+
+```yaml
+sensor.solcast_pv_forecast_forecast_next_hour
+```
+
+Bei dir ist dieser Wert in **Wh**.
+
+Beispiel:
+
+```text
+800 Wh  → 10 Punkte
+1600 Wh → 20 Punkte
+2400 Wh → 30 Punkte
+```
+
+Eine gute Prognose für die nächste Stunde erhöht den Score.
+
+---
+
+## 7. Wetterprognose: `weather_score`
+
+```jinja
+weather_score = max(forecast_max - hot_temp, 0) * 7
+```
+
+Verwendet wird:
+
+```yaml
+sensor.thz504_weather_forecast_max_temperature_next_3_days
+input_number.thz504_cooling_weather_hot_temp
+```
+
+Default:
+
+```text
+hot_temp = 27 °C
+```
+
+Beispiel:
+
+```text
+Forecast max 27 °C → 0 Punkte
+Forecast max 29 °C → 14 Punkte
+Forecast max 32 °C → 35 Punkte
+```
+
+Je heißer die nächsten Tage prognostiziert sind, desto stärker steigt der Score.
+
+---
+
+## 8. Sehr-heiß-Bonus: `very_hot_bonus`
+
+```jinja
+very_hot_bonus = 12 if forecast_max >= very_hot_temp else 0
+```
+
+Default:
+
+```text
+very_hot_temp = 30 °C
+```
+
+Wenn die Wetterprognose mindestens 30 °C sieht, gibt es pauschal:
+
+```text
++12 Punkte
+```
+
+---
+
+## 9. PV-Abregelung: `curtailment_score`
+
+```jinja
+curtailment_score = 12 if pv_limit < 100 else 0
+```
+
+Quelle:
+
+```yaml
+sensor.senec_pv_begrenzung
+```
+
+Wenn dein SENEC-System abregelt, z. B.:
+
+```text
+PV-Begrenzung = 70 %
+```
+
+dann gibt es:
+
+```text
++12 Punkte
+```
+
+Logik: Wenn PV abgeregelt wird, ist Kühlung energetisch sinnvoll, weil sonst Ertrag verloren geht.
+
+---
+
+# Negative Faktoren
+
+## 1. Akku-Entladung: `discharge_penalty`
+
+```jinja
+discharge_penalty = battery_discharge / 120
+```
+
+Beispiel:
+
+```text
+600 W Entladung  → -5 Punkte
+1200 W Entladung → -10 Punkte
+2400 W Entladung → -20 Punkte
+```
+
+Wenn der Akku stark entladen wird, spricht das gegen zusätzliche Kühlung, besonders nachts.
+
+---
+
+## 2. Regen-/Gewitterwahrscheinlichkeit: `rain_penalty`
+
+```jinja
+rain_penalty = precip_prob / 12
+```
+
+Quelle:
+
+```yaml
+sensor.thz504_weather_forecast_max_precipitation_probability_next_3_days
+```
+
+Beispiel:
+
+```text
+12 % → -1 Punkt
+60 % → -5 Punkte
+96 % → -8 Punkte
+```
+
+Dieser Faktor ist bewusst moderat. Regenwahrscheinlichkeit senkt den Score etwas, weil starke Aufheizung weniger wahrscheinlich ist.
+
+---
+
+## 3. Luftfeuchte: `humidity_penalty`
+
+```jinja
+humidity_penalty = max(humidity - threshold, 0) * 3
+```
+
+Schwellwert:
+
+```text
+Tag:   63 %
+Nacht: 60 %
+```
+
+Beispiel Tag:
+
+```text
+Luftfeuchte 63 % → 0 Punkte Abzug
+Luftfeuchte 66 % → -9 Punkte
+Luftfeuchte 70 % → -21 Punkte
+```
+
+Hohe Feuchte senkt den Score wegen Komfort und Kondensationsrisiko.
+
+---
+
+## 4. Taupunkt: `dewpoint_penalty`
+
+```jinja
+dewpoint_penalty = max(dewpoint - threshold, 0) * 14
+```
+
+Schwellwert:
+
+```text
+Tag:   17,0 °C
+Nacht: 16,5 °C
+```
+
+Beispiel Tag:
+
+```text
+Taupunkt 17,0 °C → 0 Punkte Abzug
+Taupunkt 18,0 °C → -14 Punkte
+Taupunkt 19,0 °C → -28 Punkte
+```
+
+Das ist ein starker negativer Faktor, weil Taupunkt bei Fußboden-Flächenkühlung sicherheitsrelevant ist.
+
+Wichtig: Der Score senkt nur die Priorität. Die eigentliche harte Sperre macht:
+
+```yaml
+binary_sensor.thz504_cooling_dew_point_safe
+```
+
+---
+
+# Beispielrechnung
+
+Angenommen tagsüber:
+
+```text
+gewichtete RT:          23,1 °C
+mittlere RT:            22,8 °C
+Außentemperatur:        28 °C
+PV-Überschuss:          1200 W
+Akku-SOC:               75 %
+Akku lädt:              1000 W
+Akku entlädt:           0 W
+PV-Prognose nächste h:  1200 Wh
+Forecast max 3 Tage:    31 °C
+PV-Begrenzung:          100 %
+Luftfeuchte:            60 %
+Taupunkt:               15,5 °C
+Regenwahrscheinlichkeit:20 %
+```
+
+Dann ungefähr:
+
+```text
+temp_score:       (23,1 - 22,0) * 28 = 30,8
+outdoor_score:    (28 - 20) * 3      = 24
+surplus_score:    1200 / 45          = 26,7
+soc_score:        (75 - 50) * 0,6    = 15
+charge_score:     1000 / 100         = 10
+forecast_score:   1200 / 80          = 15
+weather_score:    (31 - 27) * 7      = 28
+very_hot_bonus:   12
+rain_penalty:     20 / 12            = -1,7
+humidity_penalty: 0
+dewpoint_penalty: 0
+```
+
+Summe:
+
+```text
+ca. 160 Punkte
+```
+
+Da der Score auf 100 gedeckelt wird:
+
+```text
+Cooling Score = 100 %
+```
+
+Das heißt: Sehr starke Kühlpriorität.
+
+---
+
+# Wie du den Score interpretieren solltest
+
+|    Score | Interpretation                                 |
+| -------: | ---------------------------------------------- |
+|   0–20 % | Kühlung energetisch/thermisch kaum sinnvoll    |
+|  20–40 % | leichte Tendenz, aber kein starker Druck       |
+|  40–60 % | Kühlung plausibel, Bedingungen mittel          |
+|  60–80 % | deutlicher Kühlbedarf oder gute PV-/Wetterlage |
+| 80–100 % | starke Kühlpriorität                           |
+
+Aber nochmals: Der Score ist **kein Startsignal**.
+
+Für die reale Entscheidung sind maßgeblich:
+
+```yaml
+sensor.thz504_cooling_start_blocker
+binary_sensor.thz504_cooling_start_conditions_met
+binary_sensor.thz504_cooling_start_allowed
+binary_sensor.thz504_cooling_stop_required
+```
+
+---
+
+# Warum der Score trotzdem nützlich ist
+
+Er hilft dir beim Feintuning.
+
+Beispiele:
+
+Wenn der Score oft hoch ist, aber `Start Allowed` bleibt `off`, dann blockiert eine harte Bedingung. Dann schaust du auf:
+
+```yaml
+sensor.thz504_cooling_start_blocker
+```
+
+Wenn der Score sehr niedrig ist, aber die Kühlung häufig läuft, dann sind die harten Schwellen eventuell zu locker.
+
+Wenn der Score bei heißem Wetter und PV-Überschuss nicht steigt, sind meist diese Sensoren zu prüfen:
+
+```yaml
+sensor.thz504_cooling_effective_pv_surplus
+sensor.solcast_pv_forecast_forecast_next_hour
+sensor.thz504_weather_forecast_max_temperature_next_3_days
+sensor.senec_pv_begrenzung
+```
