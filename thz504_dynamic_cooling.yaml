@@ -1,4 +1,4 @@
-# Version: 0.6.0
+# Version: 0.6.1
 # Synopsis: Generalized PV-, weather- and UI-time-aware floor cooling control for Tecalor THZ504.
 # Description:
 #   Home Assistant package for conservative floor cooling control.
@@ -14,6 +14,7 @@
 #   - UI-controllable day/night time window
 #   - Live synchronization of UI setpoint helpers to THZ climate entities
 #   - Dewpoint and humidity safety checks
+#   - v0.6.1 fixes Home Assistant entity_id generation for Dew Point Safe
 #   - Flow/return delta diagnostics
 #   - Push notifications on control-state changes
 #
@@ -585,7 +586,7 @@ template:
             no_cooling_demand
           {% elif is_state('binary_sensor.thz504_cooling_energy_available', 'off') %}
             insufficient_pv_battery_or_grid_condition
-          {% elif is_state('binary_sensor.thz504_cooling_dewpoint_safe', 'off') %}
+          {% elif is_state('binary_sensor.thz504_cooling_dew_point_safe', 'off') %}
             dewpoint_or_humidity_risk
           {% elif is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'off') %}
             compressor_start_limit_reached
@@ -805,7 +806,7 @@ template:
             and is_state('binary_sensor.thz504_cooling_sensor_data_valid', 'on')
             and is_state('binary_sensor.thz504_cooling_demand', 'on')
             and is_state('binary_sensor.thz504_cooling_energy_available', 'on')
-            and is_state('binary_sensor.thz504_cooling_dewpoint_safe', 'on')
+            and is_state('binary_sensor.thz504_cooling_dew_point_safe', 'on')
             and is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'on')
             and is_state('binary_sensor.thz504_cooling_time_window_allowed', 'on')
             and is_state('timer.thz504_cooling_lockout', 'idle')
@@ -821,7 +822,7 @@ template:
           {% set comfort_override = is_state('binary_sensor.thz504_cooling_comfort_override', 'on') %}
           {% set active = is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
           {% set no_demand = weighted <= stop %}
-          {% set dewpoint_risk = is_state('binary_sensor.thz504_cooling_dewpoint_safe', 'off') %}
+          {% set dewpoint_risk = is_state('binary_sensor.thz504_cooling_dew_point_safe', 'off') %}
           {% set no_energy = is_state('binary_sensor.thz504_cooling_energy_available', 'off') and not comfort_override %}
           {% set starts_limit = is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'off') %}
           {% set time_blocked = is_state('binary_sensor.thz504_cooling_time_window_allowed', 'off') and not comfort_override %}
@@ -978,7 +979,7 @@ automation:
         to: "off"
         for: "00:10:00"
       - platform: state
-        entity_id: binary_sensor.thz504_cooling_dewpoint_safe
+        entity_id: binary_sensor.thz504_cooling_dew_point_safe
         to: "off"
         for: "00:05:00"
       - platform: template
@@ -1011,7 +1012,7 @@ automation:
           message: >
             Cooling was stopped for safety. Reason={{ states('sensor.thz504_cooling_control_reason') }}.
             Sensor data valid={{ states('binary_sensor.thz504_cooling_sensor_data_valid') }},
-            dewpoint safe={{ states('binary_sensor.thz504_cooling_dewpoint_safe') }},
+            dewpoint safe={{ states('binary_sensor.thz504_cooling_dew_point_safe') }},
             humidity={{ states(humidity_entity) }} %, dewpoint={{ states(dewpoint_entity) }} °C,
             flow={{ states(flow_entity) }} °C, return={{ states(return_entity) }} °C,
             delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K.
@@ -1087,7 +1088,7 @@ automation:
           - binary_sensor.thz504_cooling_stop_required
           - binary_sensor.thz504_cooling_demand
           - binary_sensor.thz504_cooling_energy_available
-          - binary_sensor.thz504_cooling_dewpoint_safe
+          - binary_sensor.thz504_cooling_dew_point_safe
           - binary_sensor.thz504_cooling_compressor_starts_safe
           - binary_sensor.thz504_cooling_time_window_allowed
           - binary_sensor.thz504_cooling_sensor_data_valid
@@ -1130,7 +1131,7 @@ automation:
             stop_required={{ states('binary_sensor.thz504_cooling_stop_required') }},
             demand={{ states('binary_sensor.thz504_cooling_demand') }},
             energy={{ states('binary_sensor.thz504_cooling_energy_available') }},
-            dewpoint_safe={{ states('binary_sensor.thz504_cooling_dewpoint_safe') }},
+            dewpoint_safe={{ states('binary_sensor.thz504_cooling_dew_point_safe') }},
             heat_extraction={{ states('binary_sensor.thz504_cooling_effective_heat_extraction') }},
             weather_pressure={{ states('binary_sensor.thz504_weather_cooling_pressure') }}.
             RT weighted={{ states(weighted_entity) }} °C,
