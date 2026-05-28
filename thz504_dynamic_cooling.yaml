@@ -1,0 +1,1059 @@
+# Version: 0.5.0
+# Synopsis: Generalized PV- and weather-aware floor cooling control for Tecalor THZ504.
+# Description:
+#   Home Assistant package for conservative floor cooling control.
+#   Edit the input_text entity mapping block to adapt the package to another installation.
+#   Comfort target defaults to 22 °C average room temperature.
+#   The THZ internal cooling, compressor, flow-temperature and dewpoint protection remain authoritative.
+#
+# Main functions:
+#   - Dynamic cooling enable/disable
+#   - PV surplus and curtailment optimization
+#   - Battery-aware day/night logic
+#   - Weather forecast aware pre-cooling
+#   - Dewpoint and humidity safety checks
+#   - Flow/return delta diagnostics
+#   - Push notifications on control-state changes
+#
+# Notes:
+#   - Solcast forecast sensors are expected in Wh.
+#   - weather.get_forecasts is used with type: daily.
+#   - For floor cooling, all relevant heating/cooling circuits must provide sufficient flow.
+
+input_text:
+  thz504_entity_indoor_temp_average:
+    name: THZ504 Entity Indoor Temperature Average
+    initial: sensor.temperatur_haus_mittel_alle
+    max: 120
+
+  thz504_entity_indoor_temp_weighted:
+    name: THZ504 Entity Indoor Temperature Weighted
+    initial: sensor.temperatur_haus_kuhlung_gewichtung
+    max: 120
+
+  thz504_entity_indoor_humidity_average:
+    name: THZ504 Entity Indoor Humidity Average
+    initial: sensor.luftfeuchtigkeit_haus_mittel
+    max: 120
+
+  thz504_entity_outdoor_temp:
+    name: THZ504 Entity Outdoor Temperature
+    initial: sensor.temperatur_aussen_mittel
+    max: 120
+
+  thz504_entity_weather:
+    name: THZ504 Entity Weather
+    initial: weather.ieppel31
+    max: 120
+
+  thz504_entity_pv_generation:
+    name: THZ504 Entity PV Generation
+    initial: sensor.senec_pv_erzeugung
+    max: 120
+
+  thz504_entity_pv_direct_consumption:
+    name: THZ504 Entity PV Direct Consumption
+    initial: sensor.senec_pv_direktverbrauch
+    max: 120
+
+  thz504_entity_pv_surplus:
+    name: THZ504 Entity PV Surplus
+    initial: sensor.pv_ueberschuss
+    max: 120
+
+  thz504_entity_pv_curtailment:
+    name: THZ504 Entity PV Curtailment
+    initial: sensor.senec_pv_begrenzung
+    max: 120
+
+  thz504_entity_grid_import:
+    name: THZ504 Entity Grid Import
+    initial: sensor.senec_netz_bezug
+    max: 120
+
+  thz504_entity_grid_export:
+    name: THZ504 Entity Grid Export
+    initial: sensor.senec_netz_einspeisung
+    max: 120
+
+  thz504_entity_battery_soc:
+    name: THZ504 Entity Battery SOC
+    initial: sensor.senec_akku_ladestand
+    max: 120
+
+  thz504_entity_battery_charge:
+    name: THZ504 Entity Battery Charge
+    initial: sensor.senec_akku_laden
+    max: 120
+
+  thz504_entity_battery_discharge:
+    name: THZ504 Entity Battery Discharge
+    initial: sensor.senec_akku_entladen
+    max: 120
+
+  thz504_entity_pv_forecast_next_hour:
+    name: THZ504 Entity PV Forecast Next Hour
+    initial: sensor.solcast_pv_forecast_forecast_next_hour
+    max: 120
+
+  thz504_entity_pv_forecast_today:
+    name: THZ504 Entity PV Forecast Today
+    initial: sensor.solcast_pv_forecast_forecast_today
+    max: 120
+
+  thz504_entity_pv_forecast_tomorrow:
+    name: THZ504 Entity PV Forecast Tomorrow
+    initial: sensor.solcast_pv_forecast_forecast_tomorrow
+    max: 120
+
+  thz504_entity_cooling_mode_switch:
+    name: THZ504 Entity Cooling Mode Switch
+    initial: switch.esp32_thz_controller_kuehlmode
+    max: 120
+
+  thz504_entity_compressor:
+    name: THZ504 Entity Compressor
+    initial: binary_sensor.esp32_thz_controller_verdichter
+    max: 120
+
+  thz504_entity_compressor_starts_today:
+    name: THZ504 Entity Compressor Starts Today
+    initial: sensor.esp32_thz_controller_starts_tag
+    max: 120
+
+  thz504_entity_compressor_runtime_current:
+    name: THZ504 Entity Compressor Runtime Current
+    initial: sensor.thz_verdichter_laufzeit_aktuell
+    max: 120
+
+  thz504_entity_flow_temperature:
+    name: THZ504 Entity Flow Temperature
+    initial: sensor.esp32_thz_controller_vorlaufisttemp
+    max: 120
+
+  thz504_entity_return_temperature:
+    name: THZ504 Entity Return Temperature
+    initial: sensor.esp32_thz_controller_ruecklaufisttemp
+    max: 120
+
+  thz504_entity_dewpoint:
+    name: THZ504 Entity Dewpoint
+    initial: sensor.esp32_thz_controller_taupunkt_hk1
+    max: 120
+
+  thz504_entity_climate_day:
+    name: THZ504 Entity Climate Day
+    initial: climate.esp32_thz_controller_heating_day
+    max: 120
+
+  thz504_entity_climate_night:
+    name: THZ504 Entity Climate Night
+    initial: climate.esp32_thz_controller_heating_night
+    max: 120
+
+  thz504_entity_notify_service:
+    name: THZ504 Notify Service
+    initial: notify.mobile_app_op13
+    max: 120
+
+input_boolean:
+  thz504_cooling_automation_enabled:
+    name: THZ504 Cooling Automation Enabled
+    icon: mdi:snowflake-auto
+    initial: true
+
+  thz504_cooling_allow_night:
+    name: THZ504 Cooling Allow Night Operation
+    icon: mdi:weather-night
+    initial: true
+
+  thz504_cooling_pv_preconditioning_enabled:
+    name: THZ504 Cooling PV Preconditioning Enabled
+    icon: mdi:solar-power-variant
+    initial: true
+
+  thz504_cooling_weather_preconditioning_enabled:
+    name: THZ504 Cooling Weather Preconditioning Enabled
+    icon: mdi:weather-sunny-alert
+    initial: true
+
+input_number:
+  thz504_cooling_day_start_temp:
+    name: THZ504 Cooling Day Start Temperature
+    min: 21
+    max: 28
+    step: 0.1
+    unit_of_measurement: "°C"
+    initial: 23.2
+
+  thz504_cooling_day_stop_temp:
+    name: THZ504 Cooling Day Stop Temperature
+    min: 20
+    max: 26
+    step: 0.1
+    unit_of_measurement: "°C"
+    initial: 22.0
+
+  thz504_cooling_night_start_temp:
+    name: THZ504 Cooling Night Start Temperature
+    min: 21
+    max: 29
+    step: 0.1
+    unit_of_measurement: "°C"
+    initial: 23.8
+
+  thz504_cooling_night_stop_temp:
+    name: THZ504 Cooling Night Stop Temperature
+    min: 20
+    max: 27
+    step: 0.1
+    unit_of_measurement: "°C"
+    initial: 22.8
+
+  thz504_cooling_comfort_override_temp:
+    name: THZ504 Cooling Comfort Override Temperature
+    min: 23
+    max: 30
+    step: 0.1
+    unit_of_measurement: "°C"
+    initial: 24.8
+
+  thz504_cooling_day_setpoint:
+    name: THZ504 Cooling Day Setpoint
+    min: 20
+    max: 25
+    step: 0.5
+    unit_of_measurement: "°C"
+    initial: 22.0
+
+  thz504_cooling_night_setpoint:
+    name: THZ504 Cooling Night Setpoint
+    min: 20
+    max: 26
+    step: 0.5
+    unit_of_measurement: "°C"
+    initial: 22.8
+
+  thz504_cooling_min_pv_surplus_day:
+    name: THZ504 Cooling Minimum PV Surplus Day
+    min: 0
+    max: 5000
+    step: 100
+    unit_of_measurement: "W"
+    initial: 700
+
+  thz504_cooling_min_grid_export_day:
+    name: THZ504 Cooling Minimum Grid Export Day
+    min: 0
+    max: 5000
+    step: 100
+    unit_of_measurement: "W"
+    initial: 500
+
+  thz504_cooling_max_grid_import_day:
+    name: THZ504 Cooling Maximum Grid Import Day
+    min: 0
+    max: 3000
+    step: 100
+    unit_of_measurement: "W"
+    initial: 500
+
+  thz504_cooling_max_grid_import_night:
+    name: THZ504 Cooling Maximum Grid Import Night
+    min: 0
+    max: 3000
+    step: 100
+    unit_of_measurement: "W"
+    initial: 250
+
+  thz504_cooling_min_battery_soc_day:
+    name: THZ504 Cooling Minimum Battery SOC Day
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    initial: 45
+
+  thz504_cooling_min_battery_soc_night:
+    name: THZ504 Cooling Minimum Battery SOC Night
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    initial: 70
+
+  thz504_cooling_max_battery_discharge_night:
+    name: THZ504 Cooling Maximum Battery Discharge Night
+    min: 0
+    max: 5000
+    step: 100
+    unit_of_measurement: "W"
+    initial: 1500
+
+  thz504_cooling_min_pv_forecast_next_hour_wh:
+    name: THZ504 Cooling Minimum PV Forecast Next Hour
+    min: 0
+    max: 5000
+    step: 100
+    unit_of_measurement: "Wh"
+    initial: 800
+
+  thz504_cooling_min_pv_forecast_today_wh:
+    name: THZ504 Cooling Minimum PV Forecast Today
+    min: 0
+    max: 50000
+    step: 500
+    unit_of_measurement: "Wh"
+    initial: 12000
+
+  thz504_cooling_weather_hot_temp:
+    name: THZ504 Cooling Weather Hot Temperature
+    min: 20
+    max: 40
+    step: 0.5
+    unit_of_measurement: "°C"
+    initial: 27.0
+
+  thz504_cooling_weather_very_hot_temp:
+    name: THZ504 Cooling Weather Very Hot Temperature
+    min: 22
+    max: 42
+    step: 0.5
+    unit_of_measurement: "°C"
+    initial: 30.0
+
+  thz504_cooling_weather_max_precip_probability:
+    name: THZ504 Cooling Weather Maximum Precipitation Probability
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    initial: 60
+
+  thz504_cooling_weather_precooling_offset:
+    name: THZ504 Cooling Weather Precooling Offset
+    min: 0
+    max: 2
+    step: 0.1
+    unit_of_measurement: "K"
+    initial: 0.4
+
+  thz504_cooling_max_dewpoint_day:
+    name: THZ504 Cooling Maximum Dewpoint Day
+    min: 10
+    max: 22
+    step: 0.1
+    unit_of_measurement: "°C"
+    initial: 17.0
+
+  thz504_cooling_max_dewpoint_night:
+    name: THZ504 Cooling Maximum Dewpoint Night
+    min: 10
+    max: 22
+    step: 0.1
+    unit_of_measurement: "°C"
+    initial: 16.5
+
+  thz504_cooling_max_humidity_day:
+    name: THZ504 Cooling Maximum Indoor Humidity Day
+    min: 45
+    max: 80
+    step: 1
+    unit_of_measurement: "%"
+    initial: 65
+
+  thz504_cooling_max_humidity_night:
+    name: THZ504 Cooling Maximum Indoor Humidity Night
+    min: 45
+    max: 80
+    step: 1
+    unit_of_measurement: "%"
+    initial: 62
+
+  thz504_cooling_dewpoint_safety_margin:
+    name: THZ504 Cooling Dewpoint Safety Margin
+    min: 2
+    max: 6
+    step: 0.1
+    unit_of_measurement: "K"
+    initial: 3.0
+
+  thz504_cooling_max_compressor_starts:
+    name: THZ504 Cooling Maximum Compressor Starts Per Day
+    min: 2
+    max: 30
+    step: 1
+    initial: 12
+
+  thz504_cooling_min_effective_delta:
+    name: THZ504 Cooling Minimum Effective Return Flow Delta
+    min: 0
+    max: 5
+    step: 0.1
+    unit_of_measurement: "K"
+    initial: 0.5
+
+timer:
+  thz504_cooling_min_runtime:
+    name: THZ504 Cooling Minimum Runtime
+    duration: "01:30:00"
+
+  thz504_cooling_lockout:
+    name: THZ504 Cooling Lockout After Stop
+    duration: "01:30:00"
+
+template:
+  - trigger:
+      - platform: time_pattern
+        hours: "/1"
+      - platform: homeassistant
+        event: start
+    action:
+      - variables:
+          weather_entity: "{{ states('input_text.thz504_entity_weather') }}"
+      - service: weather.get_forecasts
+        target:
+          entity_id: "{{ weather_entity }}"
+        data:
+          type: daily
+        response_variable: thz504_weather_response
+    sensor:
+      - name: "THZ504 Weather Forecast Today Temperature"
+        unique_id: thz504_weather_forecast_today_temperature
+        unit_of_measurement: "°C"
+        state: >
+          {% set weather_entity = states('input_text.thz504_entity_weather') %}
+          {% set fc = thz504_weather_response.get(weather_entity, {}).get('forecast', []) if thz504_weather_response is defined else [] %}
+          {{ fc[0].temperature | float(0) if fc | count > 0 else 0 }}
+
+      - name: "THZ504 Weather Forecast Tomorrow Temperature"
+        unique_id: thz504_weather_forecast_tomorrow_temperature
+        unit_of_measurement: "°C"
+        state: >
+          {% set weather_entity = states('input_text.thz504_entity_weather') %}
+          {% set fc = thz504_weather_response.get(weather_entity, {}).get('forecast', []) if thz504_weather_response is defined else [] %}
+          {{ fc[1].temperature | float(0) if fc | count > 1 else 0 }}
+
+      - name: "THZ504 Weather Forecast Max Temperature Next 3 Days"
+        unique_id: thz504_weather_forecast_max_temperature_next_3_days
+        unit_of_measurement: "°C"
+        state: >
+          {% set weather_entity = states('input_text.thz504_entity_weather') %}
+          {% set fc = thz504_weather_response.get(weather_entity, {}).get('forecast', []) if thz504_weather_response is defined else [] %}
+          {% set ns = namespace(max_temp=0) %}
+          {% for day in fc[:3] %}
+            {% set temp = day.temperature | float(0) %}
+            {% if temp > ns.max_temp %}
+              {% set ns.max_temp = temp %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.max_temp | round(1) }}
+
+      - name: "THZ504 Weather Forecast Max Precipitation Probability Next 3 Days"
+        unique_id: thz504_weather_forecast_max_precip_probability_next_3_days
+        unit_of_measurement: "%"
+        state: >
+          {% set weather_entity = states('input_text.thz504_entity_weather') %}
+          {% set fc = thz504_weather_response.get(weather_entity, {}).get('forecast', []) if thz504_weather_response is defined else [] %}
+          {% set ns = namespace(max_prob=0) %}
+          {% for day in fc[:3] %}
+            {% set prob = day.precipitation_probability | float(0) %}
+            {% if prob > ns.max_prob %}
+              {% set ns.max_prob = prob %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.max_prob | round(0) }}
+
+      - name: "THZ504 Weather Forecast Today Condition"
+        unique_id: thz504_weather_forecast_today_condition
+        state: >
+          {% set weather_entity = states('input_text.thz504_entity_weather') %}
+          {% set fc = thz504_weather_response.get(weather_entity, {}).get('forecast', []) if thz504_weather_response is defined else [] %}
+          {{ fc[0].condition if fc | count > 0 and fc[0].condition is defined else 'unknown' }}
+
+      - name: "THZ504 Weather Forecast Tomorrow Condition"
+        unique_id: thz504_weather_forecast_tomorrow_condition
+        state: >
+          {% set weather_entity = states('input_text.thz504_entity_weather') %}
+          {% set fc = thz504_weather_response.get(weather_entity, {}).get('forecast', []) if thz504_weather_response is defined else [] %}
+          {{ fc[1].condition if fc | count > 1 and fc[1].condition is defined else 'unknown' }}
+
+  - trigger:
+      - platform: time_pattern
+        minutes: "/1"
+      - platform: homeassistant
+        event: start
+      - platform: state
+        entity_id:
+          - input_boolean.thz504_cooling_automation_enabled
+          - input_boolean.thz504_cooling_allow_night
+          - input_boolean.thz504_cooling_pv_preconditioning_enabled
+          - input_boolean.thz504_cooling_weather_preconditioning_enabled
+          - timer.thz504_cooling_min_runtime
+          - timer.thz504_cooling_lockout
+    sensor:
+      - name: "THZ504 Cooling Net Grid Surplus"
+        unique_id: thz504_cooling_net_grid_surplus
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set export_entity = states('input_text.thz504_entity_grid_export') %}
+          {% set import_entity = states('input_text.thz504_entity_grid_import') %}
+          {% set export = states(export_entity) | float(0) %}
+          {% set import = states(import_entity) | float(0) %}
+          {{ (export - import) | round(0) }}
+
+      - name: "THZ504 Cooling Effective PV Surplus"
+        unique_id: thz504_cooling_effective_pv_surplus
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set pv_surplus_entity = states('input_text.thz504_entity_pv_surplus') %}
+          {% set grid_export_entity = states('input_text.thz504_entity_grid_export') %}
+          {% set grid_import_entity = states('input_text.thz504_entity_grid_import') %}
+          {% set pv_surplus = states(pv_surplus_entity) | float(0) %}
+          {% set grid_export = states(grid_export_entity) | float(0) %}
+          {% set grid_import = states(grid_import_entity) | float(0) %}
+          {{ [pv_surplus, grid_export - grid_import, 0] | max | round(0) }}
+
+      - name: "THZ504 Cooling Return Flow Delta"
+        unique_id: thz504_cooling_return_flow_delta
+        unit_of_measurement: "K"
+        state_class: measurement
+        state: >
+          {% set flow_entity = states('input_text.thz504_entity_flow_temperature') %}
+          {% set return_entity = states('input_text.thz504_entity_return_temperature') %}
+          {% set flow = states(flow_entity) | float(0) %}
+          {% set ret = states(return_entity) | float(0) %}
+          {{ (ret - flow) | round(2) }}
+
+      - name: "THZ504 Cooling Active Setpoint"
+        unique_id: thz504_cooling_active_setpoint
+        unit_of_measurement: "°C"
+        state: >
+          {% if is_state('binary_sensor.thz504_cooling_daytime', 'on') %}
+            {{ states('input_number.thz504_cooling_day_setpoint') | float(22.0) }}
+          {% else %}
+            {{ states('input_number.thz504_cooling_night_setpoint') | float(22.8) }}
+          {% endif %}
+
+      - name: "THZ504 Cooling Dynamic Start Temperature"
+        unique_id: thz504_cooling_dynamic_start_temperature
+        unit_of_measurement: "°C"
+        state: >
+          {% set daytime = is_state('binary_sensor.thz504_cooling_daytime', 'on') %}
+          {% set base_start = states('input_number.thz504_cooling_day_start_temp') | float(23.2) if daytime else states('input_number.thz504_cooling_night_start_temp') | float(23.8) %}
+          {% set offset = states('input_number.thz504_cooling_weather_precooling_offset') | float(0.4) %}
+          {% set weather_pressure = is_state('binary_sensor.thz504_weather_cooling_pressure', 'on') %}
+          {% set pv_preconditioning = is_state('input_boolean.thz504_cooling_pv_preconditioning_enabled', 'on') %}
+          {% set weather_preconditioning = is_state('input_boolean.thz504_cooling_weather_preconditioning_enabled', 'on') %}
+          {% if daytime and pv_preconditioning and weather_preconditioning and weather_pressure %}
+            {{ (base_start - offset) | round(1) }}
+          {% else %}
+            {{ base_start | round(1) }}
+          {% endif %}
+
+      - name: "THZ504 Cooling Control Reason"
+        unique_id: thz504_cooling_control_reason
+        icon: mdi:information-outline
+        state: >
+          {% if is_state('binary_sensor.thz504_cooling_start_allowed', 'on') %}
+            start_allowed
+          {% elif is_state('binary_sensor.thz504_cooling_stop_required', 'on') %}
+            stop_required
+          {% elif is_state('binary_sensor.thz504_cooling_sensor_data_valid', 'off') %}
+            invalid_sensor_data
+          {% elif is_state('binary_sensor.thz504_cooling_demand', 'off') %}
+            no_cooling_demand
+          {% elif is_state('binary_sensor.thz504_cooling_energy_available', 'off') %}
+            insufficient_pv_battery_or_grid_condition
+          {% elif is_state('binary_sensor.thz504_cooling_dewpoint_safe', 'off') %}
+            dewpoint_or_humidity_risk
+          {% elif is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'off') %}
+            compressor_start_limit_reached
+          {% elif is_state('binary_sensor.thz504_cooling_time_window_allowed', 'off') %}
+            night_cooling_disabled
+          {% elif is_state('binary_sensor.thz504_cooling_effective_heat_extraction', 'off') and is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
+            low_cooling_delta
+          {% elif is_state('timer.thz504_cooling_lockout', 'active') %}
+            lockout_active
+          {% elif is_state('binary_sensor.thz504_weather_cooling_pressure', 'on') %}
+            weather_preconditioning_ready
+          {% else %}
+            waiting
+          {% endif %}
+
+      - name: "THZ504 Cooling Score"
+        unique_id: thz504_cooling_score
+        unit_of_measurement: "%"
+        state_class: measurement
+        state: >
+          {% set weighted = states(states('input_text.thz504_entity_indoor_temp_weighted')) | float(0) %}
+          {% set avg = states(states('input_text.thz504_entity_indoor_temp_average')) | float(0) %}
+          {% set outdoor = states(states('input_text.thz504_entity_outdoor_temp')) | float(0) %}
+          {% set effective_surplus = states('sensor.thz504_cooling_effective_pv_surplus') | float(0) %}
+          {% set soc = states(states('input_text.thz504_entity_battery_soc')) | float(0) %}
+          {% set battery_charge = states(states('input_text.thz504_entity_battery_charge')) | float(0) %}
+          {% set battery_discharge = states(states('input_text.thz504_entity_battery_discharge')) | float(0) %}
+          {% set pv_next_wh = states(states('input_text.thz504_entity_pv_forecast_next_hour')) | float(0) %}
+          {% set pv_limit = states(states('input_text.thz504_entity_pv_curtailment')) | float(100) %}
+          {% set humidity = states(states('input_text.thz504_entity_indoor_humidity_average')) | float(0) %}
+          {% set dewpoint = states(states('input_text.thz504_entity_dewpoint')) | float(99) %}
+          {% set forecast_max = states('sensor.thz504_weather_forecast_max_temperature_next_3_days') | float(0) %}
+          {% set precip_prob = states('sensor.thz504_weather_forecast_max_precipitation_probability_next_3_days') | float(0) %}
+          {% set daytime = is_state('binary_sensor.thz504_cooling_daytime', 'on') %}
+          {% set temp_reference = 22.0 if daytime else 22.8 %}
+          {% set hot_temp = states('input_number.thz504_cooling_weather_hot_temp') | float(27) %}
+          {% set very_hot_temp = states('input_number.thz504_cooling_weather_very_hot_temp') | float(30) %}
+          {% set temp_score = ([weighted, avg] | max - temp_reference) * 28 %}
+          {% set outdoor_score = (outdoor - 20) * 3 %}
+          {% set surplus_score = effective_surplus / 45 %}
+          {% set soc_score = (soc - 50) * 0.6 %}
+          {% set charge_score = battery_charge / 100 %}
+          {% set discharge_penalty = battery_discharge / 120 %}
+          {% set forecast_score = pv_next_wh / 80 %}
+          {% set weather_score = [forecast_max - hot_temp, 0] | max * 7 %}
+          {% set very_hot_bonus = 12 if forecast_max >= very_hot_temp else 0 %}
+          {% set rain_penalty = precip_prob / 12 %}
+          {% set curtailment_score = 12 if pv_limit < 100 else 0 %}
+          {% set humidity_penalty = [humidity - (63 if daytime else 60), 0] | max * 3 %}
+          {% set dewpoint_penalty = [dewpoint - (17 if daytime else 16.5), 0] | max * 14 %}
+          {% set score = temp_score + outdoor_score + surplus_score + soc_score + charge_score + forecast_score + weather_score + very_hot_bonus + curtailment_score - discharge_penalty - rain_penalty - humidity_penalty - dewpoint_penalty %}
+          {{ [[score, 0] | max, 100] | min | round(0) }}
+
+    binary_sensor:
+      - name: "THZ504 Cooling Daytime"
+        unique_id: thz504_cooling_daytime
+        state: >
+          {% set hour = now().hour + (now().minute / 60) %}
+          {{ hour >= 8.0 and hour < 21.0 }}
+
+      - name: "THZ504 Weather Cooling Pressure"
+        unique_id: thz504_weather_cooling_pressure
+        state: >
+          {% set today = states('sensor.thz504_weather_forecast_today_temperature') | float(0) %}
+          {% set tomorrow = states('sensor.thz504_weather_forecast_tomorrow_temperature') | float(0) %}
+          {% set max3 = states('sensor.thz504_weather_forecast_max_temperature_next_3_days') | float(0) %}
+          {% set precip = states('sensor.thz504_weather_forecast_max_precipitation_probability_next_3_days') | float(0) %}
+          {% set hot = states('input_number.thz504_cooling_weather_hot_temp') | float(27) %}
+          {% set very_hot = states('input_number.thz504_cooling_weather_very_hot_temp') | float(30) %}
+          {% set max_precip = states('input_number.thz504_cooling_weather_max_precip_probability') | float(60) %}
+          {{ (today >= hot or tomorrow >= hot or max3 >= very_hot) and precip <= max_precip }}
+
+      - name: "THZ504 Cooling Sensor Data Valid"
+        unique_id: thz504_cooling_sensor_data_valid
+        state: >
+          {% set entities = [
+            states('input_text.thz504_entity_indoor_temp_average'),
+            states('input_text.thz504_entity_indoor_temp_weighted'),
+            states('input_text.thz504_entity_indoor_humidity_average'),
+            states('input_text.thz504_entity_outdoor_temp'),
+            states('input_text.thz504_entity_weather'),
+            states('input_text.thz504_entity_pv_generation'),
+            states('input_text.thz504_entity_pv_direct_consumption'),
+            states('input_text.thz504_entity_pv_curtailment'),
+            states('input_text.thz504_entity_pv_surplus'),
+            states('input_text.thz504_entity_grid_import'),
+            states('input_text.thz504_entity_grid_export'),
+            states('input_text.thz504_entity_battery_soc'),
+            states('input_text.thz504_entity_battery_charge'),
+            states('input_text.thz504_entity_battery_discharge'),
+            states('input_text.thz504_entity_pv_forecast_next_hour'),
+            states('input_text.thz504_entity_pv_forecast_today'),
+            states('input_text.thz504_entity_dewpoint'),
+            states('input_text.thz504_entity_flow_temperature'),
+            states('input_text.thz504_entity_return_temperature'),
+            states('input_text.thz504_entity_compressor'),
+            states('input_text.thz504_entity_compressor_starts_today'),
+            states('input_text.thz504_entity_cooling_mode_switch'),
+            states('input_text.thz504_entity_climate_day'),
+            states('input_text.thz504_entity_climate_night')
+          ] %}
+          {% set ns = namespace(valid=true) %}
+          {% for e in entities %}
+            {% if e in ['', 'unknown', 'unavailable', 'none', 'None'] or not has_value(e) %}
+              {% set ns.valid = false %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.valid }}
+
+      - name: "THZ504 Cooling Demand"
+        unique_id: thz504_cooling_demand
+        state: >
+          {% set weighted = states(states('input_text.thz504_entity_indoor_temp_weighted')) | float(0) %}
+          {% set avg = states(states('input_text.thz504_entity_indoor_temp_average')) | float(0) %}
+          {% set active = is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
+          {% set start = states('sensor.thz504_cooling_dynamic_start_temperature') | float(23.2) %}
+          {% set daytime = is_state('binary_sensor.thz504_cooling_daytime', 'on') %}
+          {% set stop = states('input_number.thz504_cooling_day_stop_temp') | float(22.0) if daytime else states('input_number.thz504_cooling_night_stop_temp') | float(22.8) %}
+          {{ weighted >= start or avg >= (start + 0.3) or (active and weighted > stop) }}
+
+      - name: "THZ504 Cooling Comfort Override"
+        unique_id: thz504_cooling_comfort_override
+        state: >
+          {% set weighted = states(states('input_text.thz504_entity_indoor_temp_weighted')) | float(0) %}
+          {% set avg = states(states('input_text.thz504_entity_indoor_temp_average')) | float(0) %}
+          {% set override = states('input_number.thz504_cooling_comfort_override_temp') | float(24.8) %}
+          {{ weighted >= override or avg >= (override + 0.2) }}
+
+      - name: "THZ504 Cooling Energy Available"
+        unique_id: thz504_cooling_energy_available
+        state: >
+          {% set effective_surplus = states('sensor.thz504_cooling_effective_pv_surplus') | float(0) %}
+          {% set grid_export = states(states('input_text.thz504_entity_grid_export')) | float(0) %}
+          {% set grid_import = states(states('input_text.thz504_entity_grid_import')) | float(0) %}
+          {% set pv = states(states('input_text.thz504_entity_pv_generation')) | float(0) %}
+          {% set pv_limit = states(states('input_text.thz504_entity_pv_curtailment')) | float(100) %}
+          {% set soc = states(states('input_text.thz504_entity_battery_soc')) | float(0) %}
+          {% set battery_charge = states(states('input_text.thz504_entity_battery_charge')) | float(0) %}
+          {% set battery_discharge = states(states('input_text.thz504_entity_battery_discharge')) | float(0) %}
+          {% set pv_next_wh = states(states('input_text.thz504_entity_pv_forecast_next_hour')) | float(0) %}
+          {% set pv_today_wh = states(states('input_text.thz504_entity_pv_forecast_today')) | float(0) %}
+          {% set daytime = is_state('binary_sensor.thz504_cooling_daytime', 'on') %}
+          {% set comfort_override = is_state('binary_sensor.thz504_cooling_comfort_override', 'on') %}
+          {% set pv_preconditioning = is_state('input_boolean.thz504_cooling_pv_preconditioning_enabled', 'on') %}
+          {% set weather_pressure = is_state('binary_sensor.thz504_weather_cooling_pressure', 'on') %}
+          {% set weather_preconditioning = is_state('input_boolean.thz504_cooling_weather_preconditioning_enabled', 'on') %}
+          {% set min_surplus_day = states('input_number.thz504_cooling_min_pv_surplus_day') | float(700) %}
+          {% set min_export_day = states('input_number.thz504_cooling_min_grid_export_day') | float(500) %}
+          {% set max_import_day = states('input_number.thz504_cooling_max_grid_import_day') | float(500) %}
+          {% set max_import_night = states('input_number.thz504_cooling_max_grid_import_night') | float(250) %}
+          {% set min_soc_day = states('input_number.thz504_cooling_min_battery_soc_day') | float(45) %}
+          {% set min_soc_night = states('input_number.thz504_cooling_min_battery_soc_night') | float(70) %}
+          {% set max_discharge_night = states('input_number.thz504_cooling_max_battery_discharge_night') | float(1500) %}
+          {% set min_next_wh = states('input_number.thz504_cooling_min_pv_forecast_next_hour_wh') | float(800) %}
+          {% set min_today_wh = states('input_number.thz504_cooling_min_pv_forecast_today_wh') | float(12000) %}
+          {% set day_direct_surplus = daytime and effective_surplus >= min_surplus_day and grid_import <= max_import_day %}
+          {% set day_grid_export = daytime and grid_export >= min_export_day and grid_import <= max_import_day %}
+          {% set day_forecast_supported = daytime and pv_preconditioning and pv >= 1200 and pv_next_wh >= min_next_wh and pv_today_wh >= min_today_wh and grid_import <= max_import_day %}
+          {% set day_weather_supported = daytime and weather_preconditioning and weather_pressure and pv_preconditioning and pv_next_wh >= (min_next_wh * 0.7) and grid_import <= max_import_day %}
+          {% set day_battery_supported = daytime and soc >= min_soc_day and battery_discharge <= 1500 and grid_import <= max_import_day %}
+          {% set curtailment_supported = daytime and pv_limit < 100 and pv >= 1200 %}
+          {% set battery_charging_supported = daytime and battery_charge >= 500 and grid_import <= max_import_day %}
+          {% set night_battery_supported = not daytime and soc >= min_soc_night and battery_discharge <= max_discharge_night and grid_import <= max_import_night %}
+          {{ day_direct_surplus or day_grid_export or day_forecast_supported or day_weather_supported or day_battery_supported or curtailment_supported or battery_charging_supported or night_battery_supported or comfort_override }}
+
+      - name: "THZ504 Cooling Dewpoint Safe"
+        unique_id: thz504_cooling_dewpoint_safe
+        state: >
+          {% set humidity = states(states('input_text.thz504_entity_indoor_humidity_average')) | float(99) %}
+          {% set dewpoint = states(states('input_text.thz504_entity_dewpoint')) | float(99) %}
+          {% set flow = states(states('input_text.thz504_entity_flow_temperature')) | float(99) %}
+          {% set compressor_on = is_state(states('input_text.thz504_entity_compressor'), 'on') %}
+          {% set daytime = is_state('binary_sensor.thz504_cooling_daytime', 'on') %}
+          {% set max_humidity = states('input_number.thz504_cooling_max_humidity_day') | float(65) if daytime else states('input_number.thz504_cooling_max_humidity_night') | float(62) %}
+          {% set max_dewpoint = states('input_number.thz504_cooling_max_dewpoint_day') | float(17.0) if daytime else states('input_number.thz504_cooling_max_dewpoint_night') | float(16.5) %}
+          {% set margin = states('input_number.thz504_cooling_dewpoint_safety_margin') | float(3.0) %}
+          {% set general_safe = humidity <= max_humidity and dewpoint <= max_dewpoint %}
+          {% set flow_safe = flow >= (dewpoint + margin) %}
+          {{ general_safe and (not compressor_on or flow_safe) }}
+
+      - name: "THZ504 Cooling Compressor Starts Safe"
+        unique_id: thz504_cooling_compressor_starts_safe
+        state: >
+          {% set starts = states(states('input_text.thz504_entity_compressor_starts_today')) | int(0) %}
+          {% set max_starts = states('input_number.thz504_cooling_max_compressor_starts') | int(12) %}
+          {{ starts < max_starts }}
+
+      - name: "THZ504 Cooling Time Window Allowed"
+        unique_id: thz504_cooling_time_window_allowed
+        state: >
+          {{ is_state('binary_sensor.thz504_cooling_daytime', 'on') or is_state('input_boolean.thz504_cooling_allow_night', 'on') }}
+
+      - name: "THZ504 Cooling Effective Heat Extraction"
+        unique_id: thz504_cooling_effective_heat_extraction
+        state: >
+          {% set delta = states('sensor.thz504_cooling_return_flow_delta') | float(0) %}
+          {% set min_delta = states('input_number.thz504_cooling_min_effective_delta') | float(0.5) %}
+          {% set compressor_on = is_state(states('input_text.thz504_entity_compressor'), 'on') %}
+          {% set cooling_on = is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
+          {{ not cooling_on or not compressor_on or delta >= min_delta }}
+
+      - name: "THZ504 Cooling Start Allowed"
+        unique_id: thz504_cooling_start_allowed
+        state: >
+          {{
+            is_state('input_boolean.thz504_cooling_automation_enabled', 'on')
+            and is_state('binary_sensor.thz504_cooling_sensor_data_valid', 'on')
+            and is_state('binary_sensor.thz504_cooling_demand', 'on')
+            and is_state('binary_sensor.thz504_cooling_energy_available', 'on')
+            and is_state('binary_sensor.thz504_cooling_dewpoint_safe', 'on')
+            and is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'on')
+            and is_state('binary_sensor.thz504_cooling_time_window_allowed', 'on')
+            and is_state('timer.thz504_cooling_lockout', 'idle')
+            and is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'off')
+          }}
+
+      - name: "THZ504 Cooling Stop Required"
+        unique_id: thz504_cooling_stop_required
+        state: >
+          {% set weighted = states(states('input_text.thz504_entity_indoor_temp_weighted')) | float(99) %}
+          {% set daytime = is_state('binary_sensor.thz504_cooling_daytime', 'on') %}
+          {% set stop = states('input_number.thz504_cooling_day_stop_temp') | float(22.0) if daytime else states('input_number.thz504_cooling_night_stop_temp') | float(22.8) %}
+          {% set comfort_override = is_state('binary_sensor.thz504_cooling_comfort_override', 'on') %}
+          {% set active = is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
+          {% set no_demand = weighted <= stop %}
+          {% set dewpoint_risk = is_state('binary_sensor.thz504_cooling_dewpoint_safe', 'off') %}
+          {% set no_energy = is_state('binary_sensor.thz504_cooling_energy_available', 'off') and not comfort_override %}
+          {% set starts_limit = is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'off') %}
+          {% set time_blocked = is_state('binary_sensor.thz504_cooling_time_window_allowed', 'off') and not comfort_override %}
+          {% set invalid_data = is_state('binary_sensor.thz504_cooling_sensor_data_valid', 'off') %}
+          {{ active and (no_demand or dewpoint_risk or no_energy or starts_limit or time_blocked or invalid_data) }}
+
+automation:
+  - id: thz504_dynamic_floor_cooling_start
+    alias: "THZ504 - Dynamic Floor Cooling Start"
+    description: "Starts THZ504 floor cooling when comfort, PV/battery/grid, weather and dewpoint safety allow it."
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.thz504_cooling_start_allowed
+        to: "on"
+        for: "00:15:00"
+      - platform: time_pattern
+        minutes: "/10"
+    condition:
+      - condition: state
+        entity_id: binary_sensor.thz504_cooling_start_allowed
+        state: "on"
+    action:
+      - variables:
+          climate_day_entity: "{{ states('input_text.thz504_entity_climate_day') }}"
+          climate_night_entity: "{{ states('input_text.thz504_entity_climate_night') }}"
+          cooling_switch_entity: "{{ states('input_text.thz504_entity_cooling_mode_switch') }}"
+          notify_service: "{{ states('input_text.thz504_entity_notify_service') }}"
+          weighted_entity: "{{ states('input_text.thz504_entity_indoor_temp_weighted') }}"
+          average_entity: "{{ states('input_text.thz504_entity_indoor_temp_average') }}"
+          humidity_entity: "{{ states('input_text.thz504_entity_indoor_humidity_average') }}"
+          dewpoint_entity: "{{ states('input_text.thz504_entity_dewpoint') }}"
+          flow_entity: "{{ states('input_text.thz504_entity_flow_temperature') }}"
+          return_entity: "{{ states('input_text.thz504_entity_return_temperature') }}"
+          grid_import_entity: "{{ states('input_text.thz504_entity_grid_import') }}"
+          grid_export_entity: "{{ states('input_text.thz504_entity_grid_export') }}"
+          battery_soc_entity: "{{ states('input_text.thz504_entity_battery_soc') }}"
+          pv_forecast_next_hour_entity: "{{ states('input_text.thz504_entity_pv_forecast_next_hour') }}"
+          compressor_starts_entity: "{{ states('input_text.thz504_entity_compressor_starts_today') }}"
+      - service: climate.set_temperature
+        target:
+          entity_id: "{{ climate_day_entity }}"
+        data:
+          temperature: "{{ states('input_number.thz504_cooling_day_setpoint') | float(22.0) }}"
+      - service: climate.set_temperature
+        target:
+          entity_id: "{{ climate_night_entity }}"
+        data:
+          temperature: "{{ states('input_number.thz504_cooling_night_setpoint') | float(22.8) }}"
+      - service: switch.turn_on
+        target:
+          entity_id: "{{ cooling_switch_entity }}"
+      - service: timer.start
+        target:
+          entity_id: timer.thz504_cooling_min_runtime
+      - service: "{{ notify_service }}"
+        data:
+          title: "THZ504 Cooling started"
+          message: >
+            Cooling has been enabled. Reason={{ states('sensor.thz504_cooling_control_reason') }}.
+            Weighted={{ states(weighted_entity) }} °C, average={{ states(average_entity) }} °C,
+            target={{ states('sensor.thz504_cooling_active_setpoint') }} °C,
+            dynamic_start={{ states('sensor.thz504_cooling_dynamic_start_temperature') }} °C,
+            humidity={{ states(humidity_entity) }} %, dewpoint={{ states(dewpoint_entity) }} °C,
+            flow={{ states(flow_entity) }} °C, return={{ states(return_entity) }} °C,
+            delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K,
+            PV surplus={{ states('sensor.thz504_cooling_effective_pv_surplus') }} W,
+            grid import={{ states(grid_import_entity) }} W, grid export={{ states(grid_export_entity) }} W,
+            battery SOC={{ states(battery_soc_entity) }} %,
+            PV forecast next hour={{ states(pv_forecast_next_hour_entity) }} Wh,
+            weather max 3d={{ states('sensor.thz504_weather_forecast_max_temperature_next_3_days') }} °C,
+            weather pressure={{ states('binary_sensor.thz504_weather_cooling_pressure') }},
+            starts today={{ states(compressor_starts_entity) }}.
+      - service: logbook.log
+        data:
+          name: "THZ504 Cooling"
+          message: >
+            Cooling started. Reason={{ states('sensor.thz504_cooling_control_reason') }},
+            weighted_temperature={{ states(weighted_entity) }} °C,
+            average_temperature={{ states(average_entity) }} °C,
+            target={{ states('sensor.thz504_cooling_active_setpoint') }} °C,
+            pv_surplus={{ states('sensor.thz504_cooling_effective_pv_surplus') }} W,
+            weather_max_3d={{ states('sensor.thz504_weather_forecast_max_temperature_next_3_days') }} °C,
+            score={{ states('sensor.thz504_cooling_score') }} %.
+
+  - id: thz504_dynamic_floor_cooling_stop
+    alias: "THZ504 - Dynamic Floor Cooling Stop"
+    description: "Stops THZ504 floor cooling after minimum runtime when demand, energy or safety conditions no longer allow operation."
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.thz504_cooling_stop_required
+        to: "on"
+        for: "00:20:00"
+      - platform: time_pattern
+        minutes: "/10"
+    condition:
+      - condition: template
+        value_template: "{{ is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') }}"
+      - condition: state
+        entity_id: timer.thz504_cooling_min_runtime
+        state: "idle"
+      - condition: state
+        entity_id: binary_sensor.thz504_cooling_stop_required
+        state: "on"
+    action:
+      - variables:
+          cooling_switch_entity: "{{ states('input_text.thz504_entity_cooling_mode_switch') }}"
+          notify_service: "{{ states('input_text.thz504_entity_notify_service') }}"
+          weighted_entity: "{{ states('input_text.thz504_entity_indoor_temp_weighted') }}"
+          average_entity: "{{ states('input_text.thz504_entity_indoor_temp_average') }}"
+          humidity_entity: "{{ states('input_text.thz504_entity_indoor_humidity_average') }}"
+          dewpoint_entity: "{{ states('input_text.thz504_entity_dewpoint') }}"
+          flow_entity: "{{ states('input_text.thz504_entity_flow_temperature') }}"
+          return_entity: "{{ states('input_text.thz504_entity_return_temperature') }}"
+          grid_import_entity: "{{ states('input_text.thz504_entity_grid_import') }}"
+          grid_export_entity: "{{ states('input_text.thz504_entity_grid_export') }}"
+          battery_soc_entity: "{{ states('input_text.thz504_entity_battery_soc') }}"
+      - service: switch.turn_off
+        target:
+          entity_id: "{{ cooling_switch_entity }}"
+      - service: timer.start
+        target:
+          entity_id: timer.thz504_cooling_lockout
+      - service: "{{ notify_service }}"
+        data:
+          title: "THZ504 Cooling stopped"
+          message: >
+            Cooling has been disabled. Reason={{ states('sensor.thz504_cooling_control_reason') }}.
+            Weighted={{ states(weighted_entity) }} °C, average={{ states(average_entity) }} °C,
+            humidity={{ states(humidity_entity) }} %, dewpoint={{ states(dewpoint_entity) }} °C,
+            flow={{ states(flow_entity) }} °C, return={{ states(return_entity) }} °C,
+            delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K,
+            PV surplus={{ states('sensor.thz504_cooling_effective_pv_surplus') }} W,
+            grid import={{ states(grid_import_entity) }} W, grid export={{ states(grid_export_entity) }} W,
+            battery SOC={{ states(battery_soc_entity) }} %,
+            score={{ states('sensor.thz504_cooling_score') }} %.
+      - service: logbook.log
+        data:
+          name: "THZ504 Cooling"
+          message: >
+            Cooling stopped. Reason={{ states('sensor.thz504_cooling_control_reason') }},
+            weighted_temperature={{ states(weighted_entity) }} °C,
+            pv_surplus={{ states('sensor.thz504_cooling_effective_pv_surplus') }} W,
+            delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K.
+
+  - id: thz504_dynamic_floor_cooling_safety_stop
+    alias: "THZ504 - Dynamic Floor Cooling Safety Stop"
+    description: "Immediately stops cooling on invalid sensor data or condensation risk."
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.thz504_cooling_sensor_data_valid
+        to: "off"
+        for: "00:10:00"
+      - platform: state
+        entity_id: binary_sensor.thz504_cooling_dewpoint_safe
+        to: "off"
+        for: "00:05:00"
+      - platform: template
+        value_template: >
+          {% set dewpoint = states(states('input_text.thz504_entity_dewpoint')) | float(99) %}
+          {% set flow = states(states('input_text.thz504_entity_flow_temperature')) | float(99) %}
+          {% set margin = states('input_number.thz504_cooling_dewpoint_safety_margin') | float(3.0) %}
+          {{ is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') and flow < (dewpoint + margin) }}
+        for: "00:03:00"
+    condition:
+      - condition: template
+        value_template: "{{ is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') }}"
+    action:
+      - variables:
+          cooling_switch_entity: "{{ states('input_text.thz504_entity_cooling_mode_switch') }}"
+          notify_service: "{{ states('input_text.thz504_entity_notify_service') }}"
+          humidity_entity: "{{ states('input_text.thz504_entity_indoor_humidity_average') }}"
+          dewpoint_entity: "{{ states('input_text.thz504_entity_dewpoint') }}"
+          flow_entity: "{{ states('input_text.thz504_entity_flow_temperature') }}"
+          return_entity: "{{ states('input_text.thz504_entity_return_temperature') }}"
+      - service: switch.turn_off
+        target:
+          entity_id: "{{ cooling_switch_entity }}"
+      - service: timer.start
+        target:
+          entity_id: timer.thz504_cooling_lockout
+      - service: "{{ notify_service }}"
+        data:
+          title: "THZ504 Cooling safety stop"
+          message: >
+            Cooling was stopped for safety. Reason={{ states('sensor.thz504_cooling_control_reason') }}.
+            Sensor data valid={{ states('binary_sensor.thz504_cooling_sensor_data_valid') }},
+            dewpoint safe={{ states('binary_sensor.thz504_cooling_dewpoint_safe') }},
+            humidity={{ states(humidity_entity) }} %, dewpoint={{ states(dewpoint_entity) }} °C,
+            flow={{ states(flow_entity) }} °C, return={{ states(return_entity) }} °C,
+            delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K.
+      - service: logbook.log
+        data:
+          name: "THZ504 Cooling"
+          message: >
+            Cooling safety stop triggered. Reason={{ states('sensor.thz504_cooling_control_reason') }},
+            humidity={{ states(humidity_entity) }} %, dewpoint={{ states(dewpoint_entity) }} °C,
+            flow={{ states(flow_entity) }} °C.
+
+  - id: thz504_dynamic_floor_cooling_status_notification
+    alias: "THZ504 - Dynamic Floor Cooling Status Notification"
+    description: "Sends push notifications when relevant cooling control states change."
+    mode: queued
+    max: 10
+    trigger:
+      - platform: state
+        entity_id:
+          - binary_sensor.thz504_cooling_start_allowed
+          - binary_sensor.thz504_cooling_stop_required
+          - binary_sensor.thz504_cooling_demand
+          - binary_sensor.thz504_cooling_energy_available
+          - binary_sensor.thz504_cooling_dewpoint_safe
+          - binary_sensor.thz504_cooling_compressor_starts_safe
+          - binary_sensor.thz504_cooling_time_window_allowed
+          - binary_sensor.thz504_cooling_sensor_data_valid
+          - binary_sensor.thz504_cooling_effective_heat_extraction
+          - binary_sensor.thz504_weather_cooling_pressure
+    condition:
+      - condition: template
+        value_template: >
+          {{
+            trigger.from_state is not none
+            and trigger.to_state is not none
+            and trigger.from_state.state not in ['unknown', 'unavailable']
+            and trigger.to_state.state not in ['unknown', 'unavailable']
+            and trigger.from_state.state != trigger.to_state.state
+          }}
+    action:
+      - variables:
+          notify_service: "{{ states('input_text.thz504_entity_notify_service') }}"
+          cooling_switch_entity: "{{ states('input_text.thz504_entity_cooling_mode_switch') }}"
+          weighted_entity: "{{ states('input_text.thz504_entity_indoor_temp_weighted') }}"
+          average_entity: "{{ states('input_text.thz504_entity_indoor_temp_average') }}"
+          flow_entity: "{{ states('input_text.thz504_entity_flow_temperature') }}"
+          return_entity: "{{ states('input_text.thz504_entity_return_temperature') }}"
+          battery_soc_entity: "{{ states('input_text.thz504_entity_battery_soc') }}"
+      - service: "{{ notify_service }}"
+        data:
+          title: "THZ504 Cooling state changed"
+          message: >
+            {{ state_attr(trigger.entity_id, 'friendly_name') | default(trigger.entity_id, true) }} changed from {{ trigger.from_state.state }} to {{ trigger.to_state.state }}.
+            Reason={{ states('sensor.thz504_cooling_control_reason') }}.
+            Cooling={{ states(cooling_switch_entity) }},
+            start_allowed={{ states('binary_sensor.thz504_cooling_start_allowed') }},
+            stop_required={{ states('binary_sensor.thz504_cooling_stop_required') }},
+            demand={{ states('binary_sensor.thz504_cooling_demand') }},
+            energy={{ states('binary_sensor.thz504_cooling_energy_available') }},
+            dewpoint_safe={{ states('binary_sensor.thz504_cooling_dewpoint_safe') }},
+            heat_extraction={{ states('binary_sensor.thz504_cooling_effective_heat_extraction') }},
+            weather_pressure={{ states('binary_sensor.thz504_weather_cooling_pressure') }}.
+            RT weighted={{ states(weighted_entity) }} °C,
+            RT average={{ states(average_entity) }} °C,
+            flow={{ states(flow_entity) }} °C,
+            return={{ states(return_entity) }} °C,
+            delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K,
+            PV surplus={{ states('sensor.thz504_cooling_effective_pv_surplus') }} W,
+            SOC={{ states(battery_soc_entity) }} %,
+            weather max 3d={{ states('sensor.thz504_weather_forecast_max_temperature_next_3_days') }} °C,
+            score={{ states('sensor.thz504_cooling_score') }} %.
