@@ -1,5 +1,5 @@
-# Version: 0.5.0
-# Synopsis: Generalized PV- and weather-aware floor cooling control for Tecalor THZ504.
+# Version: 0.6.0
+# Synopsis: Generalized PV-, weather- and UI-time-aware floor cooling control for Tecalor THZ504.
 # Description:
 #   Home Assistant package for conservative floor cooling control.
 #   Edit the input_text entity mapping block to adapt the package to another installation.
@@ -11,6 +11,8 @@
 #   - PV surplus and curtailment optimization
 #   - Battery-aware day/night logic
 #   - Weather forecast aware pre-cooling
+#   - UI-controllable day/night time window
+#   - Live synchronization of UI setpoint helpers to THZ climate entities
 #   - Dewpoint and humidity safety checks
 #   - Flow/return delta diagnostics
 #   - Push notifications on control-state changes
@@ -176,6 +178,20 @@ input_boolean:
     name: THZ504 Cooling Weather Preconditioning Enabled
     icon: mdi:weather-sunny-alert
     initial: true
+
+
+input_datetime:
+  thz504_cooling_day_start_time:
+    name: THZ504 Cooling Day Start Time
+    has_date: false
+    has_time: true
+    initial: "08:00:00"
+
+  thz504_cooling_day_end_time:
+    name: THZ504 Cooling Day End Time
+    has_date: false
+    has_time: true
+    initial: "21:00:00"
 
 input_number:
   thz504_cooling_day_start_temp:
@@ -627,8 +643,18 @@ template:
       - name: "THZ504 Cooling Daytime"
         unique_id: thz504_cooling_daytime
         state: >
-          {% set hour = now().hour + (now().minute / 60) %}
-          {{ hour >= 8.0 and hour < 21.0 }}
+          {% set start = states('input_datetime.thz504_cooling_day_start_time') %}
+          {% set end = states('input_datetime.thz504_cooling_day_end_time') %}
+          {% set now_s = now().hour * 3600 + now().minute * 60 + now().second %}
+          {% set start_s = (start[0:2] | int(8)) * 3600 + (start[3:5] | int(0)) * 60 + (start[6:8] | int(0)) %}
+          {% set end_s = (end[0:2] | int(21)) * 3600 + (end[3:5] | int(0)) * 60 + (end[6:8] | int(0)) %}
+          {% if start_s < end_s %}
+            {{ now_s >= start_s and now_s < end_s }}
+          {% elif start_s > end_s %}
+            {{ now_s >= start_s or now_s < end_s }}
+          {% else %}
+            true
+          {% endif %}
 
       - name: "THZ504 Weather Cooling Pressure"
         unique_id: thz504_weather_cooling_pressure
@@ -997,6 +1023,58 @@ automation:
             humidity={{ states(humidity_entity) }} %, dewpoint={{ states(dewpoint_entity) }} °C,
             flow={{ states(flow_entity) }} °C.
 
+  - id: thz504_dynamic_floor_cooling_setpoint_sync
+    alias: "THZ504 - Dynamic Floor Cooling Setpoint Sync"
+    description: "Synchronizes UI-controlled cooling setpoint helpers to the mapped THZ climate entities."
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - input_number.thz504_cooling_day_setpoint
+          - input_number.thz504_cooling_night_setpoint
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: input_boolean.thz504_cooling_automation_enabled
+        state: "on"
+    action:
+      - delay: "00:00:10"
+      - variables:
+          climate_day_entity: "{{ states('input_text.thz504_entity_climate_day') }}"
+          climate_night_entity: "{{ states('input_text.thz504_entity_climate_night') }}"
+          notify_service: "{{ states('input_text.thz504_entity_notify_service') }}"
+      - service: climate.set_temperature
+        target:
+          entity_id: "{{ climate_day_entity }}"
+        data:
+          temperature: "{{ states('input_number.thz504_cooling_day_setpoint') | float(22.0) }}"
+      - service: climate.set_temperature
+        target:
+          entity_id: "{{ climate_night_entity }}"
+        data:
+          temperature: "{{ states('input_number.thz504_cooling_night_setpoint') | float(22.8) }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.platform == 'state' }}"
+            sequence:
+              - service: "{{ notify_service }}"
+                data:
+                  title: "THZ504 Cooling setpoint synchronized"
+                  message: >
+                    Cooling setpoints were synchronized to THZ.
+                    Day={{ states('input_number.thz504_cooling_day_setpoint') }} °C,
+                    night={{ states('input_number.thz504_cooling_night_setpoint') }} °C,
+                    climate_day={{ climate_day_entity }},
+                    climate_night={{ climate_night_entity }}.
+      - service: logbook.log
+        data:
+          name: "THZ504 Cooling"
+          message: >
+            Cooling setpoints synchronized to THZ. Day={{ states('input_number.thz504_cooling_day_setpoint') }} °C,
+            night={{ states('input_number.thz504_cooling_night_setpoint') }} °C.
+
   - id: thz504_dynamic_floor_cooling_status_notification
     alias: "THZ504 - Dynamic Floor Cooling Status Notification"
     description: "Sends push notifications when relevant cooling control states change."
@@ -1015,6 +1093,10 @@ automation:
           - binary_sensor.thz504_cooling_sensor_data_valid
           - binary_sensor.thz504_cooling_effective_heat_extraction
           - binary_sensor.thz504_weather_cooling_pressure
+          - input_number.thz504_cooling_day_setpoint
+          - input_number.thz504_cooling_night_setpoint
+          - input_datetime.thz504_cooling_day_start_time
+          - input_datetime.thz504_cooling_day_end_time
     condition:
       - condition: template
         value_template: >
@@ -1040,6 +1122,9 @@ automation:
           message: >
             {{ state_attr(trigger.entity_id, 'friendly_name') | default(trigger.entity_id, true) }} changed from {{ trigger.from_state.state }} to {{ trigger.to_state.state }}.
             Reason={{ states('sensor.thz504_cooling_control_reason') }}.
+            Day window={{ states('input_datetime.thz504_cooling_day_start_time') }}-{{ states('input_datetime.thz504_cooling_day_end_time') }},
+            day_setpoint={{ states('input_number.thz504_cooling_day_setpoint') }} °C,
+            night_setpoint={{ states('input_number.thz504_cooling_night_setpoint') }} °C,
             Cooling={{ states(cooling_switch_entity) }},
             start_allowed={{ states('binary_sensor.thz504_cooling_start_allowed') }},
             stop_required={{ states('binary_sensor.thz504_cooling_stop_required') }},
