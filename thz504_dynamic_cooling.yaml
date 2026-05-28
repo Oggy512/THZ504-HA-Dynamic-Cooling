@@ -1,4 +1,4 @@
-# Version: 0.6.1
+# Version: 0.6.2
 # Synopsis: Generalized PV-, weather- and UI-time-aware floor cooling control for Tecalor THZ504.
 # Description:
 #   Home Assistant package for conservative floor cooling control.
@@ -15,6 +15,7 @@
 #   - Live synchronization of UI setpoint helpers to THZ climate entities
 #   - Dewpoint and humidity safety checks
 #   - v0.6.1 fixes Home Assistant entity_id generation for Dew Point Safe
+#   - v0.6.2 adds explicit Weather Preconditioning Ready sensor and allows weather-based pre-cooling to satisfy start demand
 #   - Flow/return delta diagnostics
 #   - Push notifications on control-state changes
 #
@@ -186,7 +187,7 @@ input_datetime:
     name: THZ504 Cooling Day Start Time
     has_date: false
     has_time: true
-    initial: "08:00:00"
+    initial: "06:00:00"
 
   thz504_cooling_day_end_time:
     name: THZ504 Cooling Day End Time
@@ -582,8 +583,6 @@ template:
             stop_required
           {% elif is_state('binary_sensor.thz504_cooling_sensor_data_valid', 'off') %}
             invalid_sensor_data
-          {% elif is_state('binary_sensor.thz504_cooling_demand', 'off') %}
-            no_cooling_demand
           {% elif is_state('binary_sensor.thz504_cooling_energy_available', 'off') %}
             insufficient_pv_battery_or_grid_condition
           {% elif is_state('binary_sensor.thz504_cooling_dew_point_safe', 'off') %}
@@ -592,12 +591,16 @@ template:
             compressor_start_limit_reached
           {% elif is_state('binary_sensor.thz504_cooling_time_window_allowed', 'off') %}
             night_cooling_disabled
-          {% elif is_state('binary_sensor.thz504_cooling_effective_heat_extraction', 'off') and is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
-            low_cooling_delta
           {% elif is_state('timer.thz504_cooling_lockout', 'active') %}
             lockout_active
-          {% elif is_state('binary_sensor.thz504_weather_cooling_pressure', 'on') %}
+          {% elif is_state('binary_sensor.thz504_cooling_effective_heat_extraction', 'off') and is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
+            low_cooling_delta
+          {% elif is_state('binary_sensor.thz504_cooling_demand', 'off') and is_state('binary_sensor.thz504_cooling_weather_preconditioning_ready', 'off') %}
+            no_cooling_demand
+          {% elif is_state('binary_sensor.thz504_cooling_weather_preconditioning_ready', 'on') %}
             weather_preconditioning_ready
+          {% elif is_state('binary_sensor.thz504_weather_cooling_pressure', 'on') %}
+            weather_pressure_only_waiting_for_room_or_energy_conditions
           {% else %}
             waiting
           {% endif %}
@@ -668,6 +671,24 @@ template:
           {% set very_hot = states('input_number.thz504_cooling_weather_very_hot_temp') | float(30) %}
           {% set max_precip = states('input_number.thz504_cooling_weather_max_precip_probability') | float(60) %}
           {{ (today >= hot or tomorrow >= hot or max3 >= very_hot) and precip <= max_precip }}
+
+      - name: "THZ504 Cooling Weather Preconditioning Ready"
+        unique_id: thz504_cooling_weather_preconditioning_ready
+        state: >
+          {% set weighted = states(states('input_text.thz504_entity_indoor_temp_weighted')) | float(0) %}
+          {% set daytime = is_state('binary_sensor.thz504_cooling_daytime', 'on') %}
+          {% set stop = states('input_number.thz504_cooling_day_stop_temp') | float(22.0) if daytime else states('input_number.thz504_cooling_night_stop_temp') | float(22.8) %}
+          {% set min_room_offset = states('input_number.thz504_cooling_weather_precooling_offset') | float(0.4) %}
+          {% set weather_pressure = is_state('binary_sensor.thz504_weather_cooling_pressure', 'on') %}
+          {% set pv_preconditioning = is_state('input_boolean.thz504_cooling_pv_preconditioning_enabled', 'on') %}
+          {% set weather_preconditioning = is_state('input_boolean.thz504_cooling_weather_preconditioning_enabled', 'on') %}
+          {{
+            daytime
+            and pv_preconditioning
+            and weather_preconditioning
+            and weather_pressure
+            and weighted >= (stop + min_room_offset)
+          }}
 
       - name: "THZ504 Cooling Sensor Data Valid"
         unique_id: thz504_cooling_sensor_data_valid
@@ -804,7 +825,10 @@ template:
           {{
             is_state('input_boolean.thz504_cooling_automation_enabled', 'on')
             and is_state('binary_sensor.thz504_cooling_sensor_data_valid', 'on')
-            and is_state('binary_sensor.thz504_cooling_demand', 'on')
+            and (
+              is_state('binary_sensor.thz504_cooling_demand', 'on')
+              or is_state('binary_sensor.thz504_cooling_weather_preconditioning_ready', 'on')
+            )
             and is_state('binary_sensor.thz504_cooling_energy_available', 'on')
             and is_state('binary_sensor.thz504_cooling_dew_point_safe', 'on')
             and is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'on')
@@ -895,6 +919,7 @@ automation:
             PV forecast next hour={{ states(pv_forecast_next_hour_entity) }} Wh,
             weather max 3d={{ states('sensor.thz504_weather_forecast_max_temperature_next_3_days') }} °C,
             weather pressure={{ states('binary_sensor.thz504_weather_cooling_pressure') }},
+            weather preconditioning ready={{ states('binary_sensor.thz504_cooling_weather_preconditioning_ready') }},
             starts today={{ states(compressor_starts_entity) }}.
       - service: logbook.log
         data:
@@ -1094,6 +1119,7 @@ automation:
           - binary_sensor.thz504_cooling_sensor_data_valid
           - binary_sensor.thz504_cooling_effective_heat_extraction
           - binary_sensor.thz504_weather_cooling_pressure
+          - binary_sensor.thz504_cooling_weather_preconditioning_ready
           - input_number.thz504_cooling_day_setpoint
           - input_number.thz504_cooling_night_setpoint
           - input_datetime.thz504_cooling_day_start_time
@@ -1133,7 +1159,8 @@ automation:
             energy={{ states('binary_sensor.thz504_cooling_energy_available') }},
             dewpoint_safe={{ states('binary_sensor.thz504_cooling_dew_point_safe') }},
             heat_extraction={{ states('binary_sensor.thz504_cooling_effective_heat_extraction') }},
-            weather_pressure={{ states('binary_sensor.thz504_weather_cooling_pressure') }}.
+            weather_pressure={{ states('binary_sensor.thz504_weather_cooling_pressure') }},
+            weather_preconditioning_ready={{ states('binary_sensor.thz504_cooling_weather_preconditioning_ready') }}.
             RT weighted={{ states(weighted_entity) }} °C,
             RT average={{ states(average_entity) }} °C,
             flow={{ states(flow_entity) }} °C,
