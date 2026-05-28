@@ -1,4 +1,4 @@
-# Version: 0.6.4
+# Version: 0.6.5
 # Synopsis: Generalized PV-, weather- and UI-time-aware floor cooling control for Tecalor THZ504.
 # Description:
 #   Home Assistant package for conservative floor cooling control.
@@ -18,8 +18,9 @@
 #   - v0.6.2 adds explicit Weather Preconditioning Ready sensor and allows weather-based pre-cooling to satisfy start demand
 #   - v0.6.3 adds Start Conditions Met, Start Blocker diagnostics and defaults Day Start Time to 06:00
 #   - v0.6.4 removes all initial: values from user-editable helpers so UI settings survive restarts
+#   - v0.6.5 limits push notifications to Start Allowed, Control Reason, Start Blocker, Stop Required, Cooling Score and Start Conditions Met
 #   - Flow/return delta diagnostics
-#   - Push notifications on control-state changes
+#   - Push notifications only for selected high-level control-state changes
 #
 # Notes:
 #   - Solcast forecast sensors are expected in Wh.
@@ -1080,25 +1081,6 @@ automation:
       - service: timer.start
         target:
           entity_id: timer.thz504_cooling_min_runtime
-      - service: "{{ notify_service }}"
-        data:
-          title: "THZ504 Cooling started"
-          message: >
-            Cooling has been enabled. Reason={{ states('sensor.thz504_cooling_control_reason') }}.
-            Weighted={{ states(weighted_entity) }} °C, average={{ states(average_entity) }} °C,
-            target={{ states('sensor.thz504_cooling_active_setpoint') }} °C,
-            dynamic_start={{ states('sensor.thz504_cooling_dynamic_start_temperature') }} °C,
-            humidity={{ states(humidity_entity) }} %, dewpoint={{ states(dewpoint_entity) }} °C,
-            flow={{ states(flow_entity) }} °C, return={{ states(return_entity) }} °C,
-            delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K,
-            PV surplus={{ states('sensor.thz504_cooling_effective_pv_surplus') }} W,
-            grid import={{ states(grid_import_entity) }} W, grid export={{ states(grid_export_entity) }} W,
-            battery SOC={{ states(battery_soc_entity) }} %,
-            PV forecast next hour={{ states(pv_forecast_next_hour_entity) }} Wh,
-            weather max 3d={{ states('sensor.thz504_weather_forecast_max_temperature_next_3_days') }} °C,
-            weather pressure={{ states('binary_sensor.thz504_weather_cooling_pressure') }},
-            weather preconditioning ready={{ states('binary_sensor.thz504_cooling_weather_preconditioning_ready') }},
-            starts today={{ states(compressor_starts_entity) }}.
       - service: logbook.log
         data:
           name: "THZ504 Cooling"
@@ -1150,19 +1132,6 @@ automation:
       - service: timer.start
         target:
           entity_id: timer.thz504_cooling_lockout
-      - service: "{{ notify_service }}"
-        data:
-          title: "THZ504 Cooling stopped"
-          message: >
-            Cooling has been disabled. Reason={{ states('sensor.thz504_cooling_control_reason') }}.
-            Weighted={{ states(weighted_entity) }} °C, average={{ states(average_entity) }} °C,
-            humidity={{ states(humidity_entity) }} %, dewpoint={{ states(dewpoint_entity) }} °C,
-            flow={{ states(flow_entity) }} °C, return={{ states(return_entity) }} °C,
-            delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K,
-            PV surplus={{ states('sensor.thz504_cooling_effective_pv_surplus') }} W,
-            grid import={{ states(grid_import_entity) }} W, grid export={{ states(grid_export_entity) }} W,
-            battery SOC={{ states(battery_soc_entity) }} %,
-            score={{ states('sensor.thz504_cooling_score') }} %.
       - service: logbook.log
         data:
           name: "THZ504 Cooling"
@@ -1209,16 +1178,6 @@ automation:
       - service: timer.start
         target:
           entity_id: timer.thz504_cooling_lockout
-      - service: "{{ notify_service }}"
-        data:
-          title: "THZ504 Cooling safety stop"
-          message: >
-            Cooling was stopped for safety. Reason={{ states('sensor.thz504_cooling_control_reason') }}.
-            Sensor data valid={{ states('binary_sensor.thz504_cooling_sensor_data_valid') }},
-            dewpoint safe={{ states('binary_sensor.thz504_cooling_dew_point_safe') }},
-            humidity={{ states(humidity_entity) }} %, dewpoint={{ states(dewpoint_entity) }} °C,
-            flow={{ states(flow_entity) }} °C, return={{ states(return_entity) }} °C,
-            delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K.
       - service: logbook.log
         data:
           name: "THZ504 Cooling"
@@ -1258,20 +1217,6 @@ automation:
           entity_id: "{{ climate_night_entity }}"
         data:
           temperature: "{{ states('input_number.thz504_cooling_night_setpoint') | float(22.8) }}"
-      - choose:
-          - conditions:
-              - condition: template
-                value_template: "{{ trigger.platform == 'state' }}"
-            sequence:
-              - service: "{{ notify_service }}"
-                data:
-                  title: "THZ504 Cooling setpoint synchronized"
-                  message: >
-                    Cooling setpoints were synchronized to THZ.
-                    Day={{ states('input_number.thz504_cooling_day_setpoint') }} °C,
-                    night={{ states('input_number.thz504_cooling_night_setpoint') }} °C,
-                    climate_day={{ climate_day_entity }},
-                    climate_night={{ climate_night_entity }}.
       - service: logbook.log
         data:
           name: "THZ504 Cooling"
@@ -1281,29 +1226,24 @@ automation:
 
   - id: thz504_dynamic_floor_cooling_status_notification
     alias: "THZ504 - Dynamic Floor Cooling Status Notification"
-    description: "Sends push notifications when relevant cooling control states change."
+    description: "Sends concise push notifications only for selected high-level cooling control state changes."
     mode: queued
     max: 10
     trigger:
       - platform: state
         entity_id:
-          - binary_sensor.thz504_cooling_start_conditions_met
+          # Cooling allowed: true only when start conditions are met and cooling is currently off.
           - binary_sensor.thz504_cooling_start_allowed
+          # Conditions met: true when all technical start conditions are met, independent of current cooling state.
+          - binary_sensor.thz504_cooling_start_conditions_met
+          # Start blocker: textual reason why start is currently blocked.
           - sensor.thz504_cooling_start_blocker
+          # Stop required: true when cooling should stop after normal stop delay/minimum runtime logic.
           - binary_sensor.thz504_cooling_stop_required
-          - binary_sensor.thz504_cooling_demand
-          - binary_sensor.thz504_cooling_energy_available
-          - binary_sensor.thz504_cooling_dew_point_safe
-          - binary_sensor.thz504_cooling_compressor_starts_safe
-          - binary_sensor.thz504_cooling_time_window_allowed
-          - binary_sensor.thz504_cooling_sensor_data_valid
-          - binary_sensor.thz504_cooling_effective_heat_extraction
-          - binary_sensor.thz504_weather_cooling_pressure
-          - binary_sensor.thz504_cooling_weather_preconditioning_ready
-          - input_number.thz504_cooling_day_setpoint
-          - input_number.thz504_cooling_night_setpoint
-          - input_datetime.thz504_cooling_day_start_time
-          - input_datetime.thz504_cooling_day_end_time
+          # Control reason: main high-level cooling state/reason.
+          - sensor.thz504_cooling_control_reason
+          # Cooling score: diagnostic priority score from 0 to 100 percent.
+          - sensor.thz504_cooling_score
     condition:
       - condition: template
         value_template: >
@@ -1317,38 +1257,15 @@ automation:
     action:
       - variables:
           notify_service: "{{ states('input_text.thz504_entity_notify_service') }}"
-          cooling_switch_entity: "{{ states('input_text.thz504_entity_cooling_mode_switch') }}"
-          weighted_entity: "{{ states('input_text.thz504_entity_indoor_temp_weighted') }}"
-          average_entity: "{{ states('input_text.thz504_entity_indoor_temp_average') }}"
-          flow_entity: "{{ states('input_text.thz504_entity_flow_temperature') }}"
-          return_entity: "{{ states('input_text.thz504_entity_return_temperature') }}"
-          battery_soc_entity: "{{ states('input_text.thz504_entity_battery_soc') }}"
+          changed_name: "{{ state_attr(trigger.entity_id, 'friendly_name') | default(trigger.entity_id, true) }}"
+          old_state: "{{ trigger.from_state.state }}"
+          new_state: "{{ trigger.to_state.state }}"
+          control_reason: "{{ states('sensor.thz504_cooling_control_reason') }}"
+          start_blocker: "{{ states('sensor.thz504_cooling_start_blocker') }}"
       - service: "{{ notify_service }}"
         data:
           title: "THZ504 Cooling state changed"
           message: >
-            {{ state_attr(trigger.entity_id, 'friendly_name') | default(trigger.entity_id, true) }} changed from {{ trigger.from_state.state }} to {{ trigger.to_state.state }}.
-            Reason={{ states('sensor.thz504_cooling_control_reason') }}.
-            Day window={{ states('input_datetime.thz504_cooling_day_start_time') }}-{{ states('input_datetime.thz504_cooling_day_end_time') }},
-            day_setpoint={{ states('input_number.thz504_cooling_day_setpoint') }} °C,
-            night_setpoint={{ states('input_number.thz504_cooling_night_setpoint') }} °C,
-            Cooling={{ states(cooling_switch_entity) }},
-            start_conditions_met={{ states('binary_sensor.thz504_cooling_start_conditions_met') }},
-            start_allowed={{ states('binary_sensor.thz504_cooling_start_allowed') }},
-            start_blocker={{ states('sensor.thz504_cooling_start_blocker') }},
-            stop_required={{ states('binary_sensor.thz504_cooling_stop_required') }},
-            demand={{ states('binary_sensor.thz504_cooling_demand') }},
-            energy={{ states('binary_sensor.thz504_cooling_energy_available') }},
-            dewpoint_safe={{ states('binary_sensor.thz504_cooling_dew_point_safe') }},
-            heat_extraction={{ states('binary_sensor.thz504_cooling_effective_heat_extraction') }},
-            weather_pressure={{ states('binary_sensor.thz504_weather_cooling_pressure') }},
-            weather_preconditioning_ready={{ states('binary_sensor.thz504_cooling_weather_preconditioning_ready') }}.
-            RT weighted={{ states(weighted_entity) }} °C,
-            RT average={{ states(average_entity) }} °C,
-            flow={{ states(flow_entity) }} °C,
-            return={{ states(return_entity) }} °C,
-            delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K,
-            PV surplus={{ states('sensor.thz504_cooling_effective_pv_surplus') }} W,
-            SOC={{ states(battery_soc_entity) }} %,
-            weather max 3d={{ states('sensor.thz504_weather_forecast_max_temperature_next_3_days') }} °C,
-            score={{ states('sensor.thz504_cooling_score') }} %.
+            {{ changed_name }} changed from {{ old_state }} to {{ new_state }}.
+            Reason={{ control_reason }}.
+            Start blocker={{ start_blocker }}.
