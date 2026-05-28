@@ -1,4 +1,4 @@
-# Version: 0.6.6
+# Version: 0.6.7
 # Synopsis: Generalized PV-, weather- and UI-time-aware floor cooling control for Tecalor THZ504.
 # Description:
 #   Home Assistant package for conservative floor cooling control.
@@ -20,8 +20,9 @@
 #   - v0.6.4 removes all initial: values from user-editable helpers so UI settings survive restarts
 #   - v0.6.5 limits push notifications to Start Allowed, Control Reason, Start Blocker, Stop Required, Cooling Score and Start Conditions Met
 #   - v0.6.6 adds dependency handling: Weather Preconditioning depends on PV Preconditioning; score pushes are reduced to 10-point band changes
+#   - v0.6.7 debounces high-level push notifications and removes Cooling Score from push triggers
 #   - Flow/return delta diagnostics
-#   - Push notifications only for selected high-level control-state changes
+#   - Push notifications only for debounced high-level control-state changes
 #
 # Notes:
 #   - Solcast forecast sensors are expected in Wh.
@@ -1288,9 +1289,8 @@ automation:
 
   - id: thz504_dynamic_floor_cooling_status_notification
     alias: "THZ504 - Dynamic Floor Cooling Status Notification"
-    description: "Sends concise push notifications only for selected high-level cooling control state changes. Cooling Score is reduced to 10-point band changes."
-    mode: queued
-    max: 10
+    description: "Sends one debounced push notification after selected high-level cooling control states have stabilized. Cooling Score is not pushed."
+    mode: restart
     trigger:
       - platform: state
         entity_id:
@@ -1304,34 +1304,38 @@ automation:
           - binary_sensor.thz504_cooling_stop_required
           # Control reason: main high-level cooling state/reason.
           - sensor.thz504_cooling_control_reason
-          # Cooling score: diagnostic priority score from 0 to 100 percent.
-          # Push notifications for this sensor are reduced to 10-point band changes.
-          - sensor.thz504_cooling_score
     condition:
       - condition: template
         value_template: >
-          {% set old = trigger.from_state.state if trigger.from_state is not none else 'unknown' %}
-          {% set new = trigger.to_state.state if trigger.to_state is not none else 'unknown' %}
-          {% set valid_change = old not in ['unknown', 'unavailable'] and new not in ['unknown', 'unavailable'] and old != new %}
-          {% if not valid_change %}
-            false
-          {% elif trigger.entity_id == 'sensor.thz504_cooling_score' %}
-            {{ (old | int(0) // 10) != (new | int(0) // 10) }}
-          {% else %}
-            true
-          {% endif %}
+          {{
+            trigger.from_state is not none
+            and trigger.to_state is not none
+            and trigger.from_state.state not in ['unknown', 'unavailable']
+            and trigger.to_state.state not in ['unknown', 'unavailable']
+            and trigger.from_state.state != trigger.to_state.state
+          }}
     action:
+      # Debounce window:
+      # Related template sensor changes are collapsed into one push notification.
+      - delay: "00:00:30"
+
       - variables:
           notify_service: "{{ states('input_text.thz504_entity_notify_service') }}"
-          changed_name: "{{ state_attr(trigger.entity_id, 'friendly_name') | default(trigger.entity_id, true) }}"
-          old_state: "{{ trigger.from_state.state }}"
-          new_state: "{{ trigger.to_state.state }}"
           control_reason: "{{ states('sensor.thz504_cooling_control_reason') }}"
           start_blocker: "{{ states('sensor.thz504_cooling_start_blocker') }}"
+          start_conditions_met: "{{ states('binary_sensor.thz504_cooling_start_conditions_met') }}"
+          start_allowed: "{{ states('binary_sensor.thz504_cooling_start_allowed') }}"
+          stop_required: "{{ states('binary_sensor.thz504_cooling_stop_required') }}"
+          cooling_switch_entity: "{{ states('input_text.thz504_entity_cooling_mode_switch') }}"
+          cooling_switch_state: "{{ states(states('input_text.thz504_entity_cooling_mode_switch')) }}"
       - service: "{{ notify_service }}"
         data:
           title: "THZ504 Cooling state changed"
           message: >
-            {{ changed_name }} changed from {{ old_state }} to {{ new_state }}.
-            Current Control Reason={{ control_reason }}.
-            Current Start blocker={{ start_blocker }}.
+            Cooling state changed:
+            Current Control Reason={{ control_reason }}
+            Current Start blocker={{ start_blocker }}
+            Conditions met={{ start_conditions_met }}
+            Start allowed={{ start_allowed }}
+            Stop required={{ stop_required }}
+            Cooling state={{ cooling_switch_state }}
