@@ -1,4 +1,4 @@
-# Version: 0.6.7
+# Version: 0.6.9
 # Synopsis: Generalized PV-, weather- and UI-time-aware floor cooling control for Tecalor THZ504.
 # Description:
 #   Home Assistant package for conservative floor cooling control.
@@ -21,6 +21,7 @@
 #   - v0.6.5 limits push notifications to Start Allowed, Control Reason, Start Blocker, Stop Required, Cooling Score and Start Conditions Met
 #   - v0.6.6 adds dependency handling: Weather Preconditioning depends on PV Preconditioning; score pushes are reduced to 10-point band changes
 #   - v0.6.7 debounces high-level push notifications and removes Cooling Score from push triggers
+#   - v0.6.9 moves the weighted cooling temperature sensor into the package, adds weekend weighting, UI notification mode and stricter heat extraction state
 #   - Flow/return delta diagnostics
 #   - Push notifications only for debounced high-level control-state changes
 #
@@ -34,6 +35,12 @@
 # Entity mapping defaults for this installation:
 #   thz504_entity_indoor_temp_average: sensor.temperatur_haus_mittel_alle
 #   thz504_entity_indoor_temp_weighted: sensor.temperatur_haus_kuhlung_gewichtung
+#   thz504_entity_room_living_temperature: sensor.eltako_gw1_05_91_dd_e4_temperature
+#   thz504_entity_room_bedroom_temperature: sensor.eltako_gw1_05_91_df_e0_temperature
+#   thz504_entity_room_office_temperature: sensor.eltako_gw1_05_96_20_c7_temperature
+#   thz504_entity_room_kitchen_temperature: sensor.eltako_gw1_05_93_c2_32_temperature
+#   thz504_entity_room_guest_temperature: sensor.eltako_gw1_05_96_2a_9f_temperature
+#   thz504_entity_room_dressing_temperature: sensor.eltako_gw1_05_91_dd_cb_temperature
 #   thz504_entity_indoor_humidity_average: sensor.luftfeuchtigkeit_haus_mittel
 #   thz504_entity_outdoor_temp: sensor.temperatur_aussen_mittel
 #   thz504_entity_weather: weather.ieppel31
@@ -59,6 +66,7 @@
 #   thz504_entity_climate_day: climate.esp32_thz_controller_heating_day
 #   thz504_entity_climate_night: climate.esp32_thz_controller_heating_night
 #   thz504_entity_notify_service: notify.mobile_app_op13
+#   thz504_cooling_notification_mode: info
 #
 # Feature defaults:
 #   thz504_cooling_automation_enabled: on
@@ -292,6 +300,21 @@ input_boolean:
   thz504_cooling_weather_preconditioning_enabled:
     name: THZ504 Cooling Weather Preconditioning Enabled
     icon: mdi:weather-sunny-alert
+
+
+# Notification mode.
+# debug: debounced high-level state changes.
+# info: only actual cooling switch actions from this automation.
+# disabled: no mobile push notifications.
+# Recommended default: info
+input_select:
+  thz504_cooling_notification_mode:
+    name: THZ504 Cooling Notification Mode
+    options:
+      - debug
+      - info
+      - disabled
+    icon: mdi:bell-cog-outline
 
 
 # UI configurable day/night window. Day mode uses PV-oriented thresholds; night mode is more conservative.
@@ -653,6 +676,172 @@ template:
           - timer.thz504_cooling_min_runtime
           - timer.thz504_cooling_lockout
     sensor:
+
+      # Robust, dynamically weighted indoor temperature for cooling control.
+      # Weekdays:
+      #   - Morning / early afternoon: office and guest/second office are weighted higher.
+      #   - Afternoon / evening: living room and kitchen are weighted higher.
+      #   - Evening / night: bedroom is weighted higher.
+      # Weekend:
+      #   - Office and guest/second office are weighted with priority 1 all day.
+      #   - Living room is weighted with priority 4 from 08:00 to 21:00.
+      # Invalid room sensors are ignored together with their weight.
+      - name: "Temperatur Haus Kühlung Gewichtung"
+        unique_id: temperatur_haus_kuehlung_gewichtung
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        state: >
+          {% set hour = now().hour + (now().minute / 60) %}
+          {% set weekday = now().weekday() %}
+          {% set is_weekend = weekday in [5, 6] %}
+
+          {% set wohnzimmer_entity = 'sensor.eltako_gw1_05_91_dd_e4_temperature' %}
+          {% set schlafzimmer_entity = 'sensor.eltako_gw1_05_91_df_e0_temperature' %}
+          {% set buero_entity = 'sensor.eltako_gw1_05_96_20_c7_temperature' %}
+          {% set kueche_entity = 'sensor.eltako_gw1_05_93_c2_32_temperature' %}
+          {% set gast_entity = 'sensor.eltako_gw1_05_96_2a_9f_temperature' %}
+          {% set ankleide_entity = 'sensor.eltako_gw1_05_91_dd_cb_temperature' %}
+
+          {% set schlafzimmer = states(schlafzimmer_entity) | float(0) %}
+
+          {% if is_weekend %}
+            {# Weekend: office rooms are low priority; living area is primary during the day. #}
+            {% set w_wohnzimmer = 4.0 if hour >= 8 and hour < 21 else 3.0 %}
+            {% set w_schlafzimmer = 5.0 %}
+            {% set w_buero = 1.0 %}
+            {% set w_kueche = 1.5 %}
+            {% set w_gast = 1.0 %}
+            {% set w_ankleide = 0.5 %}
+          {% else %}
+            {# Weekdays: dynamic occupancy-based weighting. #}
+            {% set w_wohnzimmer = 3.0 %}
+            {% set w_schlafzimmer = 5.0 %}
+            {% set w_buero = 3.0 %}
+            {% set w_kueche = 1.5 %}
+            {% set w_gast = 3.0 %}
+            {% set w_ankleide = 0.5 %}
+
+            {% if hour >= 6 and hour < 14 %}
+              {# Morning / early afternoon: home office rooms are more relevant. #}
+              {% set w_buero = w_buero + 1.5 %}
+              {% set w_gast = w_gast + 1.5 %}
+            {% endif %}
+
+            {% if hour >= 14 and hour < 21 %}
+              {# Afternoon / evening: living area becomes more relevant. #}
+              {% set w_wohnzimmer = w_wohnzimmer + 1.5 %}
+              {% set w_kueche = w_kueche + 0.5 %}
+            {% endif %}
+          {% endif %}
+
+          {% if hour >= 18 or hour < 6 %}
+            {# Evening / night: bedroom becomes more relevant. #}
+            {% set w_schlafzimmer = w_schlafzimmer + 2.0 %}
+          {% endif %}
+
+          {% if hour >= 21 or hour < 6 %}
+            {# Night: bedroom is the dominant comfort zone. #}
+            {% set w_schlafzimmer = w_schlafzimmer + 2.0 %}
+          {% endif %}
+
+          {% if has_value(schlafzimmer_entity) %}
+            {# Bedroom comfort protection: increase bedroom priority when it is too warm. #}
+            {% if schlafzimmer >= 23.0 %}
+              {% set w_schlafzimmer = w_schlafzimmer + 4.0 %}
+            {% elif schlafzimmer >= 22.0 %}
+              {% set w_schlafzimmer = w_schlafzimmer + 2.0 %}
+            {% endif %}
+          {% endif %}
+
+          {% set rooms = [
+            {'name': 'Wohnzimmer',   'entity': wohnzimmer_entity,   'weight': w_wohnzimmer},
+            {'name': 'Schlafzimmer', 'entity': schlafzimmer_entity, 'weight': w_schlafzimmer},
+            {'name': 'Buero',        'entity': buero_entity,        'weight': w_buero},
+            {'name': 'Kueche',       'entity': kueche_entity,       'weight': w_kueche},
+            {'name': 'Gast',         'entity': gast_entity,         'weight': w_gast},
+            {'name': 'Ankleide',     'entity': ankleide_entity,     'weight': w_ankleide}
+          ] %}
+
+          {% set ns = namespace(weighted_sum=0, weight_sum=0) %}
+
+          {% for room in rooms %}
+            {% if has_value(room.entity) %}
+              {% set value = states(room.entity) | float %}
+              {% set ns.weighted_sum = ns.weighted_sum + (value * room.weight) %}
+              {% set ns.weight_sum = ns.weight_sum + room.weight %}
+            {% endif %}
+          {% endfor %}
+
+          {% if ns.weight_sum > 0 %}
+            {{ (ns.weighted_sum / ns.weight_sum) | round(1) }}
+          {% else %}
+            unavailable
+          {% endif %}
+        attributes:
+          weighting_profile: >
+            {% set weekday = now().weekday() %}
+            {{ 'weekend' if weekday in [5, 6] else 'weekday' }}
+          valid_rooms: >
+            {% set rooms = [
+              {'name': 'Wohnzimmer',   'entity': 'sensor.eltako_gw1_05_91_dd_e4_temperature'},
+              {'name': 'Schlafzimmer', 'entity': 'sensor.eltako_gw1_05_91_df_e0_temperature'},
+              {'name': 'Buero',        'entity': 'sensor.eltako_gw1_05_96_20_c7_temperature'},
+              {'name': 'Kueche',       'entity': 'sensor.eltako_gw1_05_93_c2_32_temperature'},
+              {'name': 'Gast',         'entity': 'sensor.eltako_gw1_05_96_2a_9f_temperature'},
+              {'name': 'Ankleide',     'entity': 'sensor.eltako_gw1_05_91_dd_cb_temperature'}
+            ] %}
+            {% set ns = namespace(names=[]) %}
+            {% for room in rooms %}
+              {% if has_value(room.entity) %}
+                {% set ns.names = ns.names + [room.name] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.names | join(', ') }}
+          current_weights: >
+            {% set hour = now().hour + (now().minute / 60) %}
+            {% set weekday = now().weekday() %}
+            {% set is_weekend = weekday in [5, 6] %}
+            {% set schlafzimmer_entity = 'sensor.eltako_gw1_05_91_df_e0_temperature' %}
+            {% set schlafzimmer = states(schlafzimmer_entity) | float(0) %}
+            {% if is_weekend %}
+              {% set w_wohnzimmer = 4.0 if hour >= 8 and hour < 21 else 3.0 %}
+              {% set w_schlafzimmer = 5.0 %}
+              {% set w_buero = 1.0 %}
+              {% set w_kueche = 1.5 %}
+              {% set w_gast = 1.0 %}
+              {% set w_ankleide = 0.5 %}
+            {% else %}
+              {% set w_wohnzimmer = 3.0 %}
+              {% set w_schlafzimmer = 5.0 %}
+              {% set w_buero = 3.0 %}
+              {% set w_kueche = 1.5 %}
+              {% set w_gast = 3.0 %}
+              {% set w_ankleide = 0.5 %}
+              {% if hour >= 6 and hour < 14 %}
+                {% set w_buero = w_buero + 1.5 %}
+                {% set w_gast = w_gast + 1.5 %}
+              {% endif %}
+              {% if hour >= 14 and hour < 21 %}
+                {% set w_wohnzimmer = w_wohnzimmer + 1.5 %}
+                {% set w_kueche = w_kueche + 0.5 %}
+              {% endif %}
+            {% endif %}
+            {% if hour >= 18 or hour < 6 %}
+              {% set w_schlafzimmer = w_schlafzimmer + 2.0 %}
+            {% endif %}
+            {% if hour >= 21 or hour < 6 %}
+              {% set w_schlafzimmer = w_schlafzimmer + 2.0 %}
+            {% endif %}
+            {% if has_value(schlafzimmer_entity) %}
+              {% if schlafzimmer >= 23.0 %}
+                {% set w_schlafzimmer = w_schlafzimmer + 4.0 %}
+              {% elif schlafzimmer >= 22.0 %}
+                {% set w_schlafzimmer = w_schlafzimmer + 2.0 %}
+              {% endif %}
+            {% endif %}
+            Wohnzimmer={{ w_wohnzimmer }}, Schlafzimmer={{ w_schlafzimmer }}, Buero={{ w_buero }}, Kueche={{ w_kueche }}, Gast={{ w_gast }}, Ankleide={{ w_ankleide }}
+
       - name: "THZ504 Cooling Net Grid Surplus"
         unique_id: thz504_cooling_net_grid_surplus
         unit_of_measurement: "W"
@@ -721,9 +910,10 @@ template:
         icon: mdi:information-outline
         state: >
           {% set cooling_on = is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
+          {% set compressor_on = is_state(states('input_text.thz504_entity_compressor'), 'on') %}
           {% if is_state('binary_sensor.thz504_cooling_start_allowed', 'on') %}
             start_allowed
-          {% elif is_state('binary_sensor.thz504_cooling_stop_required', 'on') %}
+          {% elif cooling_on and is_state('binary_sensor.thz504_cooling_stop_required', 'on') %}
             stop_required
           {% elif cooling_on and is_state('binary_sensor.thz504_cooling_start_conditions_met', 'on') %}
             cooling_active_conditions_met
@@ -733,7 +923,7 @@ template:
             start_conditions_met
           {% elif states('sensor.thz504_cooling_start_blocker') not in ['unknown', 'unavailable', 'none', ''] %}
             {{ states('sensor.thz504_cooling_start_blocker') }}
-          {% elif is_state('binary_sensor.thz504_cooling_effective_heat_extraction', 'off') and cooling_on %}
+          {% elif is_state('binary_sensor.thz504_cooling_effective_heat_extraction', 'off') and cooling_on and compressor_on %}
             low_cooling_delta
           {% elif is_state('binary_sensor.thz504_weather_cooling_pressure', 'on') %}
             weather_pressure_only_waiting_for_room_or_energy_conditions
@@ -991,7 +1181,7 @@ template:
           {% set min_delta = states('input_number.thz504_cooling_min_effective_delta') | float(0.5) %}
           {% set compressor_on = is_state(states('input_text.thz504_entity_compressor'), 'on') %}
           {% set cooling_on = is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
-          {{ not cooling_on or not compressor_on or delta >= min_delta }}
+          {{ cooling_on and compressor_on and delta >= min_delta }}
 
       - name: "THZ504 Cooling Start Conditions Met"
         unique_id: thz504_cooling_start_conditions_met
@@ -1025,14 +1215,13 @@ template:
           {% set daytime = is_state('binary_sensor.thz504_cooling_daytime', 'on') %}
           {% set stop = states('input_number.thz504_cooling_day_stop_temp') | float(22.0) if daytime else states('input_number.thz504_cooling_night_stop_temp') | float(22.8) %}
           {% set comfort_override = is_state('binary_sensor.thz504_cooling_comfort_override', 'on') %}
-          {% set active = is_state(states('input_text.thz504_entity_cooling_mode_switch'), 'on') %}
           {% set no_demand = weighted <= stop %}
           {% set dewpoint_risk = is_state('binary_sensor.thz504_cooling_dew_point_safe', 'off') %}
           {% set no_energy = is_state('binary_sensor.thz504_cooling_energy_available', 'off') and not comfort_override %}
           {% set starts_limit = is_state('binary_sensor.thz504_cooling_compressor_starts_safe', 'off') %}
           {% set time_blocked = is_state('binary_sensor.thz504_cooling_time_window_allowed', 'off') and not comfort_override %}
           {% set invalid_data = is_state('binary_sensor.thz504_cooling_sensor_data_valid', 'off') %}
-          {{ active and (no_demand or dewpoint_risk or no_energy or starts_limit or time_blocked or invalid_data) }}
+          {{ no_demand or dewpoint_risk or no_energy or starts_limit or time_blocked or invalid_data }}
 
 automation:
   - id: thz504_dynamic_floor_cooling_start
@@ -1094,6 +1283,21 @@ automation:
             pv_surplus={{ states('sensor.thz504_cooling_effective_pv_surplus') }} W,
             weather_max_3d={{ states('sensor.thz504_weather_forecast_max_temperature_next_3_days') }} °C,
             score={{ states('sensor.thz504_cooling_score') }} %.
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_select.thz504_cooling_notification_mode
+                state: "info"
+            sequence:
+              - service: "{{ notify_service }}"
+                data:
+                  title: "THZ504 Cooling switched on"
+                  message: >
+                    Cooling was switched on by automation.
+                    Reason={{ states('sensor.thz504_cooling_control_reason') }}.
+                    Start blocker={{ states('sensor.thz504_cooling_start_blocker') }}.
+                    Weighted temperature={{ states(weighted_entity) }} °C.
+                    Target={{ states('sensor.thz504_cooling_active_setpoint') }} °C.
 
   - id: thz504_dynamic_floor_cooling_stop
     alias: "THZ504 - Dynamic Floor Cooling Stop"
@@ -1142,6 +1346,21 @@ automation:
             weighted_temperature={{ states(weighted_entity) }} °C,
             pv_surplus={{ states('sensor.thz504_cooling_effective_pv_surplus') }} W,
             delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K.
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_select.thz504_cooling_notification_mode
+                state: "info"
+            sequence:
+              - service: "{{ notify_service }}"
+                data:
+                  title: "THZ504 Cooling switched off"
+                  message: >
+                    Cooling was switched off by automation.
+                    Reason={{ states('sensor.thz504_cooling_control_reason') }}.
+                    Stop required={{ states('binary_sensor.thz504_cooling_stop_required') }}.
+                    Weighted temperature={{ states(weighted_entity) }} °C.
+                    Delta={{ states('sensor.thz504_cooling_return_flow_delta') }} K.
 
   - id: thz504_dynamic_floor_cooling_safety_stop
     alias: "THZ504 - Dynamic Floor Cooling Safety Stop"
@@ -1187,6 +1406,21 @@ automation:
             Cooling safety stop triggered. Reason={{ states('sensor.thz504_cooling_control_reason') }},
             humidity={{ states(humidity_entity) }} %, dewpoint={{ states(dewpoint_entity) }} °C,
             flow={{ states(flow_entity) }} °C.
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_select.thz504_cooling_notification_mode
+                state: "info"
+            sequence:
+              - service: "{{ notify_service }}"
+                data:
+                  title: "THZ504 Cooling safety stop"
+                  message: >
+                    Cooling was switched off by safety automation.
+                    Reason={{ states('sensor.thz504_cooling_control_reason') }}.
+                    Dew point safe={{ states('binary_sensor.thz504_cooling_dew_point_safe') }}.
+                    Sensor data valid={{ states('binary_sensor.thz504_cooling_sensor_data_valid') }}.
+                    Flow={{ states(flow_entity) }} °C.
 
   - id: thz504_dynamic_floor_cooling_setpoint_sync
     alias: "THZ504 - Dynamic Floor Cooling Setpoint Sync"
@@ -1305,6 +1539,9 @@ automation:
           # Control reason: main high-level cooling state/reason.
           - sensor.thz504_cooling_control_reason
     condition:
+      - condition: state
+        entity_id: input_select.thz504_cooling_notification_mode
+        state: "debug"
       - condition: template
         value_template: >
           {{
@@ -1332,10 +1569,10 @@ automation:
         data:
           title: "THZ504 Cooling state changed"
           message: >
-            Cooling state changed:
-            Current Control Reason={{ control_reason }}
-            Current Start blocker={{ start_blocker }}
-            Conditions met={{ start_conditions_met }}
-            Start allowed={{ start_allowed }}
-            Stop required={{ stop_required }}
-            Cooling state={{ cooling_switch_state }}
+            Cooling state stabilized after recent changes.
+            Current Control Reason={{ control_reason }}.
+            Current Start blocker={{ start_blocker }}.
+            Conditions met={{ start_conditions_met }}.
+            Start allowed={{ start_allowed }}.
+            Stop required={{ stop_required }}.
+            Cooling={{ cooling_switch_state }}.
